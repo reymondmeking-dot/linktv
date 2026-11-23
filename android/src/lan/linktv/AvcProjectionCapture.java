@@ -101,6 +101,11 @@ final class AvcProjectionCapture implements ScreenCapture {
     }
 
     @Override
+    public MediaProjection mediaProjection() {
+        return projection;
+    }
+
+    @Override
     public void enableFrames() {
         drain = new Thread(this::encode, "LinkTV AVC encoder");
         drain.start();

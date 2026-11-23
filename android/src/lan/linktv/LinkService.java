@@ -1,12 +1,15 @@
 package lan.linktv;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -32,6 +35,8 @@ public final class LinkService extends Service {
     private static final String READY = "已连接，可以开始投屏";
     private static final String STOP_CAPTURE = "lan.linktv.STOP_CAPTURE";
     private static final String CHANNEL_ID = "linktv_capture";
+    private static final String PLAYBACK_SETTINGS = "linktv_playback";
+    private static final String PLAYBACK_MUTED = "muted";
     private static final int NOTIFICATION_ID = 17863;
     private static final int MAX_DECODE_PIXELS = 4096 * 2160;
     private static final int STOP_ACK_TIMEOUT_MS = 4000;
@@ -51,12 +56,13 @@ public final class LinkService extends Service {
         int frameCount;
         private PcmPlayback audio;
         volatile boolean stopRequested;
+        volatile boolean hasAudio;
         volatile AvcReceiver avc;
         boolean avcPicture;
 
-        void playAudio(byte[] pcm) {
+        void playAudio(Context context, byte[] pcm) {
             if (audio == null) {
-                audio = new PcmPlayback();
+                audio = new PcmPlayback(context);
             }
             audio.offer(pcm);
         }
@@ -137,6 +143,10 @@ public final class LinkService extends Service {
             });
         }
 
+        synchronized boolean onPcm(byte[] pcm) {
+            return enabled && source.sendAudio(pcm);
+        }
+
         synchronized boolean start(ScreenCapture selected) {
             source.control(LinkClient.START);
             announced = true;
@@ -171,11 +181,14 @@ public final class LinkService extends Service {
     private volatile boolean destroyed;
     private Listener listener;
     private ScreenCapture capture;
+    private PlaybackAudioCapture outgoingAudio;
     private CaptureListener captureListener;
     private Bitmap lastFrame;
     private boolean connected;
     private boolean foreground;
     private boolean viewerVisible;
+    private boolean playbackVisible;
+    private boolean playbackMuted;
     private Surface viewerSurface;
     private int videoCapabilities;
     private String status = IDLE;
@@ -191,6 +204,8 @@ public final class LinkService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        playbackMuted = getSharedPreferences(PLAYBACK_SETTINGS, MODE_PRIVATE)
+                .getBoolean(PLAYBACK_MUTED, false);
         localName = Discovery.deviceName(this);
         if ("Android TV".equals(localName) && !getPackageManager().hasSystemFeature("android.software.leanback")) {
             localName = "Android 设备";
@@ -273,12 +288,43 @@ public final class LinkService extends Service {
             listener = null;
             synchronized (incomingLock) {
                 viewerVisible = false;
+                playbackVisible = false;
                 if (remoteFeed != null) {
                     remoteFeed.stopAudio();
                     remoteFeed.useSurface(null);
                 }
             }
         }
+    }
+
+    void setPlaybackVisible(boolean visible) {
+        synchronized (incomingLock) {
+            playbackVisible = visible;
+            if (!visible && remoteFeed != null) {
+                remoteFeed.stopAudio();
+            }
+        }
+    }
+
+    boolean hasPlaybackAudio() {
+        RemoteFeed feed = remoteFeed;
+        return feed != null && !feed.stopRequested && feed.hasAudio;
+    }
+
+    boolean isPlaybackMuted() {
+        return playbackMuted;
+    }
+
+    void togglePlaybackMute() {
+        synchronized (incomingLock) {
+            playbackMuted = !playbackMuted;
+            if (playbackMuted && remoteFeed != null) {
+                remoteFeed.stopAudio();
+            }
+        }
+        getSharedPreferences(PLAYBACK_SETTINGS, MODE_PRIVATE).edit()
+                .putBoolean(PLAYBACK_MUTED, playbackMuted).apply();
+        notifyState();
     }
 
     boolean isConnected() {
@@ -490,7 +536,7 @@ public final class LinkService extends Service {
         updateStatus(message);
     }
 
-    void startCapture(int resultCode, Intent permission) {
+    void startCapture(int resultCode, Intent permission, boolean includeAppAudio) {
         if (resultCode != Activity.RESULT_OK || permission == null) {
             updateStatus("未授权录制本机画面");
             return;
@@ -500,26 +546,57 @@ public final class LinkService extends Service {
             return;
         }
         CaptureListener callbacks = new CaptureListener(source);
-        ScreenCapture next = source.canSendH264() ? AvcProjectionCapture.prepare(this, callbacks) : null;
-        if (next == null) {
-            next = new ProjectionCapture(callbacks);
-        }
-        capture = next;
-        captureListener = callbacks;
         try {
-            startService(new Intent(this, LinkService.class));
+            Intent foregroundStart = new Intent(this, LinkService.class);
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(foregroundStart);
+            } else {
+                startService(foregroundStart);
+            }
             enterForeground();
+            ScreenCapture next = source.canSendH264() ? AvcProjectionCapture.prepare(this, callbacks) : null;
+            if (next == null) {
+                next = new ProjectionCapture(callbacks);
+            }
+            capture = next;
+            captureListener = callbacks;
             next.start(this, resultCode, permission);
             if (!callbacks.start(next)) {
                 throw new IllegalStateException("Unable to announce AVC stream");
             }
             next.enableFrames();
-            Log.i(TAG, "TV casting started");
+            Log.i(TAG, "Device casting started");
             updateStatus("正在把本机画面投到对方设备");
+            if (includeAppAudio && Build.VERSION.SDK_INT >= 29
+                    && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                startPlaybackCapture(next, callbacks);
+            }
         } catch (RuntimeException error) {
             Log.w(TAG, "Unable to start capture: " + error.getClass().getSimpleName());
-            stopCapture("无法开启录屏，请确认系统支持录屏", true);
+            if (capture == null) {
+                stopCaptureService();
+            }
+            stopCapture("无法开启录屏，请确认系统已授权，再试一次", true);
         }
+    }
+
+    private void startPlaybackCapture(ScreenCapture video, CaptureListener transport) {
+        outgoingAudio = new PlaybackAudioCapture(video.mediaProjection(), new PlaybackAudioCapture.Listener() {
+            @Override
+            public boolean onPcm(byte[] pcm) {
+                return transport.onPcm(pcm);
+            }
+
+            @Override
+            public void unavailable() {
+                main.post(() -> {
+                    if (capture == video) {
+                        updateStatus("画面仍在投屏，应用声音无法开启");
+                    }
+                });
+            }
+        });
+        outgoingAudio.start();
     }
 
     void stopCapture() {
@@ -531,16 +608,24 @@ public final class LinkService extends Service {
         CaptureListener previousListener = captureListener;
         capture = null;
         captureListener = null;
+        if (outgoingAudio != null) {
+            outgoingAudio.close();
+            outgoingAudio = null;
+        }
         if (previous != null && previousListener != null) {
             previousListener.stop(notifyPeer);
             previous.stop();
-            stopForeground(true);
-            foreground = false;
-            stopSelf();
+            stopCaptureService();
         }
         if (message != null) {
             updateStatus(message);
         }
+    }
+
+    private void stopCaptureService() {
+        stopForeground(true);
+        foreground = false;
+        stopSelf();
     }
 
     private void onConnected(LinkClient source) {
@@ -599,8 +684,14 @@ public final class LinkService extends Service {
                     remoteFeed = null;
                     break;
                 case LinkClient.AUDIO:
-                    if (remoteFeed != null && !remoteFeed.stopRequested && viewerVisible) {
-                        remoteFeed.playAudio(payload);
+                    if (remoteFeed != null && !remoteFeed.stopRequested) {
+                        if (!remoteFeed.hasAudio) {
+                            remoteFeed.hasAudio = true;
+                            main.post(this::notifyState);
+                        }
+                        if (viewerVisible && playbackVisible && !playbackMuted) {
+                            remoteFeed.playAudio(this, payload);
+                        }
                     }
                     return;
                 case LinkClient.JPEG:
@@ -814,7 +905,7 @@ public final class LinkService extends Service {
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         Notification.Builder builder;
         if (Build.VERSION.SDK_INT >= 26) {
-            manager.createNotificationChannel(new NotificationChannel(CHANNEL_ID, "电视投屏",
+            manager.createNotificationChannel(new NotificationChannel(CHANNEL_ID, "屏幕投屏",
                     NotificationManager.IMPORTANCE_LOW));
             builder = new Notification.Builder(this, CHANNEL_ID);
         } else {
@@ -829,6 +920,9 @@ public final class LinkService extends Service {
                 .setContentTitle("正在共享本机画面")
                 .setContentText("点击打开双向投屏")
                 .setContentIntent(open)
+                .setOnlyAlertOnce(true)
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
+                .setCategory(Notification.CATEGORY_SERVICE)
                 .setOngoing(true)
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止投屏", stop)
                 .build();

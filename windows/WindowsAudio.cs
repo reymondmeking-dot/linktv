@@ -148,8 +148,12 @@ namespace LinkTV
                 try
                 {
                     bool stillMuted;
-                    if (!previouslyMuted && endpoint.GetMute(out stillMuted) >= 0 && stillMuted)
-                        endpoint.SetMute(false, IntPtr.Zero);
+                    if (!previouslyMuted)
+                    {
+                        Check(endpoint.GetMute(out stillMuted));
+                        if (stillMuted)
+                            Check(endpoint.SetMute(false, IntPtr.Zero));
+                    }
                 }
                 finally
                 {

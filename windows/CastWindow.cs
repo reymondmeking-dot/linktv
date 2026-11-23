@@ -47,6 +47,8 @@ namespace LinkTV
         private readonly Label muteComputerLabel = MakeLabel("本机静音", 9, FontStyle.Regular, Ink);
         private readonly Label helpText = MakeWrappedLabel("", 9, FontStyle.Regular, Muted, Color.White);
         private readonly Label connectionStatus = MakeWrappedLabel("正在检查网络", 10, FontStyle.Regular, Muted, Lavender);
+        private readonly Button fullscreenButton = MakeButton("全屏观看", false);
+        private readonly Button receiverMuteButton = MakeButton("静音本机投屏声音", false);
         private readonly ToolTip statusTooltip = new ToolTip();
         private readonly PictureBox picture = new PictureBox();
         private readonly SoftSurface previewIdle = new SoftSurface(Blush, Lavender, 20);
@@ -67,10 +69,14 @@ namespace LinkTV
         private StatusViewport helpStatusSurface;
         private Label discoveryTip;
         private Panel audioOptions;
+        private Panel previewCanvas;
+        private Panel receiverAudioBar;
+        private TableLayoutPanel previewLayout;
+        private Form fullscreenWindow;
         private int headerMinimum;
-        private int discoveryTipHeight;
         private int sendHeight;
         private int audioOptionsHeight;
+        private int receiverAudioHeight;
         private CastHub hub;
         private NearbyTvDiscovery discovery;
         private BonjourRegistration bonjour;
@@ -88,6 +94,8 @@ namespace LinkTV
         private H264Preview h264Preview;
         private bool audioReady;
         private string audioWarning;
+        private string muteWarning;
+        private bool startingListener;
         private Bitmap pendingFrame;
         private bool previewRenderQueued;
         private int receiveVersion;
@@ -114,7 +122,7 @@ namespace LinkTV
             AutoScaleMode = AutoScaleMode.Dpi;
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(1024, 620);
-            MinimumSize = new Size(780, 580);
+            MinimumSize = new Size(640, 580);
             BackColor = Background;
             ForeColor = Ink;
             SetStyle(ControlStyles.ResizeRedraw, true);
@@ -135,6 +143,7 @@ namespace LinkTV
             shell.SetColumnSpan(header, 3);
             shell.Controls.Add(BuildPairingCard(SidebarWidth - 2 * CardPadding), 0, 1);
             shell.Controls.Add(BuildPreview(), 2, 1);
+            shell.SizeChanged += (sender, args) => ArrangeColumns();
             Controls.Add(shell);
             ResumeLayout();
 
@@ -143,6 +152,9 @@ namespace LinkTV
             confirmButton.Click += (sender, e) => ConfirmPairing(true);
             cancelButton.Click += (sender, e) => ConfirmPairing(false);
             sendButton.Click += ToggleSending;
+            fullscreenButton.Click += (sender, e) => ToggleFullscreen();
+            receiverMuteButton.Click += (sender, e) => ToggleReceivingMute();
+            picture.DoubleClick += (sender, e) => ToggleFullscreen();
             syncAudioOption.Checked = audioSupported;
             syncAudioOption.CheckedChanged += (sender, e) => UpdatePresentation();
             muteComputerOption.CheckedChanged += (sender, e) =>
@@ -170,6 +182,7 @@ namespace LinkTV
         {
             CancelCapture();
             closing = true;
+            CloseFullscreen();
             invitationTimer.Dispose();
             remoteAudio.Dispose();
             if (discovery != null)
@@ -197,6 +210,16 @@ namespace LinkTV
                 mascot.Dispose();
             }
             base.OnFormClosed(e);
+        }
+
+        private void ArrangeColumns()
+        {
+            int available = shellLayout.ClientSize.Width - shellLayout.Padding.Horizontal - (int)shellLayout.ColumnStyles[1].Width;
+            int width = Math.Max(240, Math.Min(SidebarWidth, (int)(available * 0.44)));
+            if ((int)shellLayout.ColumnStyles[0].Width != width)
+            {
+                shellLayout.ColumnStyles[0].Width = width;
+            }
         }
 
         protected override void Dispose(bool disposing)
@@ -249,10 +272,9 @@ namespace LinkTV
             form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             Label title = MakeLabel("附近设备", 15, FontStyle.Bold, Ink);
             discoveryTip = MakeLabel("在对方设备打开「双向投屏」。", 9, FontStyle.Regular, Muted);
-            discoveryTipHeight = PreferredHeight(discoveryTip, width) + 8;
             sendHeight = Math.Max(42, PreferredHeight(sendButton, width) + 6);
             audioOptions = BuildAudioOptions();
-            AddFixedRows(form, PreferredHeight(title, width) + 4, discoveryTipHeight);
+            AddFixedRows(form, PreferredHeight(title, width) + 4, PreferredHeight(discoveryTip, width) + 8);
             form.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             AddFixedRows(form, 8, sendHeight, 8, audioOptionsHeight, 0);
 
@@ -428,14 +450,26 @@ namespace LinkTV
         private Panel BuildPreview()
         {
             Panel surface = WhiteCard();
-            TableLayoutPanel card = NewTable(1, 2);
+            TableLayoutPanel card = NewTable(1, 3);
+            previewLayout = card;
             card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             Label title = MakeLabel("设备画面", 15, FontStyle.Bold, Ink);
-            AddFixedRows(card, PreferredHeight(title, 0) + 8);
+            TableLayoutPanel heading = NewTable(2, 1);
+            heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            heading.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,
+                Math.Max(104, fullscreenButton.GetPreferredSize(Size.Empty).Width + 12)));
+            heading.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            fullscreenButton.Margin = new Padding(0, 0, 0, 7);
+            fullscreenButton.Visible = false;
+            heading.Controls.Add(title, 0, 0);
+            heading.Controls.Add(fullscreenButton, 1, 0);
+            AddFixedRows(card, Math.Max(PreferredHeight(title, 0) + 8, PreferredHeight(fullscreenButton, 0) + 8));
             card.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            AddWide(card, title, 0);
+            AddFixedRows(card, 0);
+            AddWide(card, heading, 0);
 
             SoftSurface canvas = new SoftSurface(PreviewBackground, PreviewBackground, 20);
+            previewCanvas = canvas;
             picture.Dock = DockStyle.Fill;
             picture.SizeMode = PictureBoxSizeMode.Zoom;
             picture.BackColor = PreviewBackground;
@@ -478,8 +512,130 @@ namespace LinkTV
             previewIdle.BringToFront();
 
             card.Controls.Add(canvas, 0, 1);
+            receiverAudioBar = new Panel
+            {
+                BackColor = Color.White,
+                Dock = DockStyle.Fill,
+                Margin = Padding.Empty,
+                Padding = new Padding(0, 8, 0, 0),
+                Visible = false
+            };
+            receiverMuteButton.AccessibleDescription = "只影响这台电脑接收的投屏声音。";
+            receiverAudioHeight = Math.Max(41, PreferredHeight(receiverMuteButton, 0) + 6) + receiverAudioBar.Padding.Vertical;
+            receiverAudioBar.Controls.Add(receiverMuteButton);
+            card.Controls.Add(receiverAudioBar, 0, 2);
             surface.Controls.Add(card);
             return surface;
+        }
+
+        private void ToggleReceivingMute()
+        {
+            if (remoteCasting && !closing)
+            {
+                remoteAudio.SetMuted(!remoteAudio.IsMuted);
+                RefreshReceiverAudio();
+            }
+        }
+
+        private void RefreshReceiverAudio()
+        {
+            bool receiving = remoteCasting && !closing;
+            bool inWindow = receiving && fullscreenWindow == null;
+            receiverMuteButton.Text = remoteAudio.IsMuted ? "恢复本机投屏声音" : "静音本机投屏声音";
+            receiverMuteButton.Visible = receiving;
+            receiverAudioBar.Visible = inWindow;
+            previewLayout.RowStyles[2].Height = inWindow ? receiverAudioHeight : 0;
+        }
+
+        protected override bool ProcessCmdKey(ref Message message, Keys keys)
+        {
+            if (keys == Keys.F11 && (remoteCasting || fullscreenWindow != null))
+            {
+                ToggleFullscreen();
+                return true;
+            }
+            return base.ProcessCmdKey(ref message, keys);
+        }
+
+        private void ToggleFullscreen()
+        {
+            if (fullscreenWindow != null)
+            {
+                CloseFullscreen();
+            }
+            else if (remoteCasting && picture.Image != null && !closing)
+            {
+                CreateFullscreenWindow(Screen.FromControl(this).Bounds).Show(this);
+            }
+        }
+
+        private Form CreateFullscreenWindow(Rectangle bounds)
+        {
+            Form window = new Form
+            {
+                Text = "全屏观看",
+                Bounds = bounds,
+                StartPosition = FormStartPosition.Manual,
+                FormBorderStyle = FormBorderStyle.None,
+                ShowInTaskbar = false,
+                KeyPreview = true,
+                BackColor = PreviewBackground,
+                Icon = Icon
+            };
+            fullscreenWindow = window;
+            Button exit = MakeButton("退出全屏", false);
+            exit.Dock = DockStyle.None;
+            exit.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            exit.Size = new Size(Math.Max(132, exit.GetPreferredSize(Size.Empty).Width + 16),
+                Math.Max(42, PreferredHeight(exit, 0) + 8));
+            exit.Location = new Point(window.ClientSize.Width - exit.Width - 18, 18);
+            exit.Click += (sender, args) => window.Close();
+            window.KeyDown += (sender, args) =>
+            {
+                if (args.KeyCode == Keys.F11 || args.KeyCode == Keys.Escape)
+                {
+                    args.SuppressKeyPress = true;
+                    window.Close();
+                }
+            };
+            window.FormClosing += (sender, args) => RestorePreview(window);
+            window.Controls.Add(picture);
+            window.Controls.Add(exit);
+            receiverMuteButton.Dock = DockStyle.None;
+            receiverMuteButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            receiverMuteButton.Size = new Size(Math.Max(180, receiverMuteButton.GetPreferredSize(Size.Empty).Width + 18), exit.Height);
+            window.Controls.Add(receiverMuteButton);
+            receiverMuteButton.Location = new Point(exit.Left - receiverMuteButton.Width - 8, exit.Top);
+            exit.BringToFront();
+            receiverMuteButton.BringToFront();
+            RefreshReceiverAudio();
+            return window;
+        }
+
+        private void CloseFullscreen()
+        {
+            Form window = fullscreenWindow;
+            if (window != null)
+            {
+                RestorePreview(window);
+                window.Close();
+            }
+        }
+
+        private void RestorePreview(Form window)
+        {
+            if (fullscreenWindow == window)
+            {
+                fullscreenWindow = null;
+                if (!previewCanvas.IsDisposed)
+                {
+                    previewCanvas.Controls.Add(picture);
+                    previewIdle.BringToFront();
+                    receiverAudioBar.Controls.Add(receiverMuteButton);
+                    receiverMuteButton.Dock = DockStyle.Fill;
+                    RefreshReceiverAudio();
+                }
+            }
         }
 
         private void ArrangePreview(object sender, EventArgs e)
@@ -513,25 +669,45 @@ namespace LinkTV
             }
         }
 
-        private void StartListening()
+        private async void StartListening()
         {
+            if (startingListener || hub != null || closing)
+            {
+                return;
+            }
+            startingListener = true;
+            operationMessage = null;
+            UpdatePresentation();
             CastHub listener = null;
             NearbyTvDiscovery nearby = null;
             try
             {
+                FfmpegVideo.Installation video = await Task.Run(() => FfmpegVideo.FindInstallation());
+                if (closing)
+                {
+                    return;
+                }
+
                 IPAddress mask;
                 uint interfaceIndex;
                 IPAddress address = FindLocalAddress(out mask, out interfaceIndex);
                 if (address == null)
                 {
                     operationMessage = "请先把电脑连到与设备相同的网络，再点「重新检查网络」。";
-                    UpdatePresentation();
                     return;
                 }
 
                 string localName = "电脑 " + Environment.MachineName;
-                ffmpeg = FfmpegVideo.FindExecutable();
-                byte capabilities = ffmpeg == null ? (byte)0 : (byte)(CastHub.H264Send | CastHub.H264Receive);
+                ffmpeg = video == null ? null : video.Path;
+                byte capabilities = 0;
+                if (video != null && video.HasNvenc)
+                {
+                    capabilities |= CastHub.H264Send;
+                }
+                if (video != null && video.CanDecode)
+                {
+                    capabilities |= CastHub.H264Receive;
+                }
                 listener = new CastHub(address, Port, localName, capabilities);
                 nearby = new NearbyTvDiscovery(address, mask, localName);
                 listener.ConnectionChanged += OnConnectionChanged;
@@ -563,6 +739,7 @@ namespace LinkTV
             }
             finally
             {
+                startingListener = false;
                 if (hub != listener && listener != null)
                 {
                     listener.Dispose();
@@ -571,9 +748,11 @@ namespace LinkTV
                 {
                     nearby.Dispose();
                 }
+                if (!closing)
+                {
+                    UpdatePresentation();
+                }
             }
-
-            UpdatePresentation();
         }
 
         private static IPAddress FindLocalAddress(out IPAddress mask, out uint interfaceIndex)
@@ -645,6 +824,7 @@ namespace LinkTV
 
             if (hub.IsConnected)
             {
+                CancelCapture();
                 hub.Disconnect();
                 return;
             }
@@ -768,6 +948,7 @@ namespace LinkTV
             CancellationTokenSource cancellation = new CancellationTokenSource();
             captureCancellation = cancellation;
             audioWarning = null;
+            muteWarning = null;
             outgoingVideoMode = null;
             operationMessage = null;
             bool includeAudio = audioSupported && syncAudioOption.Checked;
@@ -975,6 +1156,7 @@ namespace LinkTV
         {
             if (!audioReady || !muteComputerOption.Checked)
             {
+                muteWarning = null;
                 RestoreSpeaker();
                 return;
             }
@@ -986,11 +1168,12 @@ namespace LinkTV
                 {
                     mute.Start();
                     speakerMute = mute;
+                    muteWarning = null;
                 }
                 catch (Exception error)
                 {
                     mute.Dispose();
-                    audioWarning = "无法将本机静音，对方设备仍在接收声音。";
+                    muteWarning = "无法将本机静音，对方设备仍在接收声音。";
                     System.Diagnostics.Trace.TraceWarning(error.ToString());
                 }
             }
@@ -1006,6 +1189,7 @@ namespace LinkTV
                 }
                 catch (Exception error)
                 {
+                    muteWarning = "无法恢复本机音量。请检查 Windows 音量设置。";
                     System.Diagnostics.Trace.TraceWarning(error.ToString());
                 }
                 finally
@@ -1067,6 +1251,7 @@ namespace LinkTV
                 if (!isConnected)
                 {
                     CancelCapture();
+                    remoteAudio.SetMuted(false);
                     connectedName = null;
                     operationMessage = null;
                 }
@@ -1238,6 +1423,11 @@ namespace LinkTV
                 displayedVersion = version;
                 DisplayFrame(frame);
                 previewIdle.Visible = frame == null || !remoteCasting;
+                fullscreenButton.Visible = frame != null && remoteCasting;
+                if (!remoteCasting)
+                {
+                    CloseFullscreen();
+                }
             }
         }
 
@@ -1312,14 +1502,14 @@ namespace LinkTV
                 sendButton.Enabled = connected;
             }
 
-            connectionStatus.Text = hub == null ? "网络未就绪" : screenState;
+            connectionStatus.Text = startingListener ? "正在准备投屏" : hub == null ? "网络未就绪" : screenState;
             connectionStatus.ForeColor = connected || pairing ? Accent : Ink;
             ArrangeHeader();
             connectButton.Text = hub == null ? "重新检查网络" : connected ? "断开连接" : "连接设备";
-            connectButton.Enabled = hub == null || connected || deviceList.SelectedItem != null;
+            connectButton.Enabled = !startingListener && (hub == null || connected || deviceList.SelectedItem != null);
             emptyDevices.Text = connected
                 ? connectedName ?? "已连接"
-                : hub == null ? "还未连接到局域网" : "正在查找附近设备…";
+                : startingListener ? "正在检查视频支持…" : hub == null ? "还未连接到局域网" : "正在查找附近设备…";
             bool showDeviceStatus = connected || hub == null || deviceList.Items.Count == 0;
             deviceList.Visible = !showDeviceStatus;
             deviceStatusSurface.Visible = showDeviceStatus;
@@ -1344,7 +1534,7 @@ namespace LinkTV
             {
                 audioHint = "同步声音后将静音本机。";
             }
-            helpText.Text = operationMessage ?? audioWarning ?? audioHint ?? "";
+            helpText.Text = operationMessage ?? audioWarning ?? muteWarning ?? audioHint ?? "";
             statusTooltip.SetToolTip(helpText, helpText.Text);
             ArrangeSidebar(pairing, connected);
 
@@ -1364,6 +1554,7 @@ namespace LinkTV
                 previewDetail.Text = connected ? "选「投屏到设备」，也可以接收对方共享的画面。" : "选择设备，两边确认连接。";
             }
 
+            RefreshReceiverAudio();
             previewIdle.Visible = !receiving || picture.Image == null;
         }
 
@@ -1372,7 +1563,8 @@ namespace LinkTV
             sidebarLayout.SuspendLayout();
             bool showHint = !pairing && !connected;
             discoveryTip.Visible = showHint;
-            sidebarLayout.RowStyles[1].Height = showHint ? discoveryTipHeight : 0;
+            int width = Math.Max(1, sidebarLayout.ClientSize.Width);
+            sidebarLayout.RowStyles[1].Height = showHint ? PreferredHeight(discoveryTip, width) + 8 : 0;
             sendButton.Visible = !pairing;
             audioOptions.Visible = !pairing;
             bool showHelp = !pairing && helpText.Text.Length != 0;
@@ -1381,7 +1573,6 @@ namespace LinkTV
             sidebarLayout.RowStyles[4].Height = pairing ? 0 : sendHeight;
             sidebarLayout.RowStyles[5].Height = pairing ? 0 : 8;
             sidebarLayout.RowStyles[6].Height = pairing ? 0 : audioOptionsHeight;
-            int width = Math.Max(1, sidebarLayout.ClientSize.Width);
             int helpHeight = 0;
             if (showHelp)
             {

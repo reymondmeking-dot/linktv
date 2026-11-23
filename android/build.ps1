@@ -1,8 +1,8 @@
 param(
     [string]$Jdk = $env:JAVA_HOME,
     [string]$Sdk = $env:ANDROID_HOME,
-    [string]$BuildToolsVersion = '35.0.1',
-    [string]$Platform = 'android-35'
+    [string]$BuildToolsVersion = '36.0.0',
+    [string]$Platform = 'android-36'
 )
 
 $ErrorActionPreference = 'Stop'

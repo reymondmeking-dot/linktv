@@ -1,19 +1,25 @@
 package lan.linktv;
 
+import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.media.AudioManager;
 import android.media.projection.MediaProjectionManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -24,7 +30,12 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.window.OnBackInvokedDispatcher;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -36,6 +47,9 @@ import java.util.List;
 
 public final class MainActivity extends Activity implements LinkService.Listener {
     private static final int CAPTURE_REQUEST = 481;
+    private static final int APP_AUDIO_REQUEST = 482;
+    private static final String AUDIO_SETTINGS = "linktv_sender";
+    private static final String INCLUDE_APP_AUDIO = "include_app_audio";
     private static final int FULLSCREEN_CONTROLS_TIMEOUT_MS = 3000;
     private static final int BACKGROUND = 0xfffff8f3;
     private static final int PANEL = 0xfffffcfa;
@@ -58,10 +72,12 @@ public final class MainActivity extends Activity implements LinkService.Listener
             }
             if (active) {
                 service.setListener(MainActivity.this);
+                service.setPlaybackVisible(resumed);
             }
             if (pendingPermission != null) {
-                service.startCapture(pendingResultCode, pendingPermission);
+                Intent authorized = pendingPermission;
                 pendingPermission = null;
+                service.startCapture(pendingResultCode, authorized, pendingCaptureAudio);
             }
         }
 
@@ -79,6 +95,10 @@ public final class MainActivity extends Activity implements LinkService.Listener
     private LinearLayout pairing;
     private LinearLayout connected;
     private LinearLayout actionBar;
+    private LinearLayout playbackRow;
+    private Button mutePlaybackButton;
+    private WindowInsets appliedInsets;
+    private boolean backCallbackRegistered;
     private FrameLayout canvas;
     private Button scanButton;
     private Button confirmButton;
@@ -107,6 +127,7 @@ public final class MainActivity extends Activity implements LinkService.Listener
     private boolean compact;
     private boolean television;
     private boolean active;
+    private boolean resumed;
     private boolean bound;
     private boolean fullscreen;
     private int revealKeyCode = KeyEvent.KEYCODE_UNKNOWN;
@@ -115,13 +136,22 @@ public final class MainActivity extends Activity implements LinkService.Listener
     private boolean requestingCapture;
     private int pendingResultCode;
     private Intent pendingPermission;
+    private boolean pendingCaptureAudio;
+    private boolean includeAppAudio;
     private LinkService service;
 
     @Override
     protected void onCreate(Bundle previous) {
         super.onCreate(previous);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
+        includeAppAudio = hasAppAudioPermission()
+                && getSharedPreferences(AUDIO_SETTINGS, MODE_PRIVATE).getBoolean(INCLUDE_APP_AUDIO, false);
+        if (Build.VERSION.SDK_INT >= 30) {
+            getWindow().setDecorFitsSystemWindows(false);
+        }
         buildLayout();
+        updateSystemBars();
         bound = bindService(new Intent(this, LinkService.class), connection, Context.BIND_AUTO_CREATE);
         onStateChanged();
     }
@@ -138,6 +168,10 @@ public final class MainActivity extends Activity implements LinkService.Listener
     @Override
     protected void onResume() {
         super.onResume();
+        resumed = true;
+        if (service != null) {
+            service.setPlaybackVisible(true);
+        }
         if (fullscreen) {
             hideFullscreenActions();
         }
@@ -145,6 +179,10 @@ public final class MainActivity extends Activity implements LinkService.Listener
 
     @Override
     protected void onPause() {
+        resumed = false;
+        if (service != null) {
+            service.setPlaybackVisible(false);
+        }
         clearRevealKey();
         if (fullscreen) {
             hideFullscreenActions();
@@ -163,6 +201,7 @@ public final class MainActivity extends Activity implements LinkService.Listener
 
     @Override
     protected void onDestroy() {
+        setBackCallback(false);
         fullscreenTimer.removeCallbacks(fullscreenTimeout);
         detachVideoSurface();
         if (bound) {
@@ -174,21 +213,20 @@ public final class MainActivity extends Activity implements LinkService.Listener
     @Override
     public void onConfigurationChanged(Configuration configuration) {
         super.onConfigurationChanged(configuration);
-        boolean restoreFullscreen = fullscreen;
-        fullscreenTimer.removeCallbacks(fullscreenTimeout);
-        fullscreen = false;
-        currentPanel = null;
-        renderedPeers = null;
-        detachVideoSurface();
-        displayedVideo = null;
-        buildLayout();
-        onStateChanged();
-        onFrame(lastFrame);
-        if (restoreFullscreen && service != null && service.isReceiving()) {
-            setFullscreen(true);
-        } else {
-            updateSystemBars();
+        boolean wasCompact = compact;
+        compact = configuration.screenWidthDp < 650;
+        if (compact != wasCompact) {
+            arrangeCastingActions();
+            status.setMaxWidth(dp(compact ? 128 : 365));
         }
+        if (fullscreen) {
+            hideFullscreenActions();
+        }
+        appliedInsets = null;
+        applyScreenPadding(fullscreen);
+        root.requestApplyInsets();
+        updateSystemBars();
+        onStateChanged();
     }
 
     private void buildLayout() {
@@ -199,6 +237,13 @@ public final class MainActivity extends Activity implements LinkService.Listener
                 || getPackageManager().hasSystemFeature("android.software.leanback");
         root = column();
         applyScreenPadding(false);
+        if (Build.VERSION.SDK_INT >= 30) {
+            root.setOnApplyWindowInsetsListener((view, insets) -> {
+                appliedInsets = insets;
+                applyScreenPadding(fullscreen);
+                return insets;
+            });
+        }
         root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                 new int[] { BACKGROUND, 0xfff9edf6 }));
 
@@ -210,19 +255,19 @@ public final class MainActivity extends Activity implements LinkService.Listener
             mark.setImageResource(mascot);
             mark.setScaleType(ImageView.ScaleType.FIT_CENTER);
             mark.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            int markSize = dp(compact ? 34 : 52);
+            int markSize = dp(television ? 52 : 34);
             LinearLayout.LayoutParams markLayout = new LinearLayout.LayoutParams(markSize, markSize);
             markLayout.rightMargin = dp(10);
             header.addView(mark, markLayout);
         }
-        TextView title = text("双向投屏", compact ? 23 : 28, FOREGROUND);
+        TextView title = text("双向投屏", television ? 28 : 23, FOREGROUND);
         title.setTypeface(null, Typeface.BOLD);
         header.addView(title, new LinearLayout.LayoutParams(0, dp(46), 1));
         status = text("正在搜索附近设备…", 15, RASPBERRY);
         status.setGravity(Gravity.CENTER);
         status.setPadding(dp(14), 0, dp(14), 0);
         status.setBackground(box(LAVENDER, BORDER, dp(22)));
-        status.setMaxWidth(dp(compact ? 136 : 365));
+        status.setMaxWidth(dp(compact ? 128 : 365));
         status.setSingleLine(true);
         status.setEllipsize(android.text.TextUtils.TruncateAt.END);
         header.addView(status, new LinearLayout.LayoutParams(
@@ -302,8 +347,8 @@ public final class MainActivity extends Activity implements LinkService.Listener
         });
         cancelButton = button("取消", false);
         cancelButton.setOnClickListener(view -> cancelPairing());
-        addButton(choices, confirmButton, 124);
-        addButton(choices, cancelButton, 124);
+        addWeightedButton(choices, confirmButton, true);
+        addWeightedButton(choices, cancelButton, false);
         LinearLayout.LayoutParams row = wide();
         row.topMargin = dp(16);
         pairing.addView(choices, row);
@@ -337,24 +382,26 @@ public final class MainActivity extends Activity implements LinkService.Listener
         peerName = text("", 14, DIM);
         peerName.setSingleLine(true);
         peerName.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        if (compact) {
-            actionBar = column();
-            actionBar.addView(peerName, wide());
-            addCompactRow(primaryAction, stopAction);
-            addCompactRow(fullscreenButton, disconnectButton);
-        } else {
-            actionBar = new LinearLayout(this);
-            actionBar.setGravity(Gravity.CENTER_VERTICAL);
-            addButton(actionBar, primaryAction, 128);
-            addButton(actionBar, stopAction, 136);
-            addButton(actionBar, fullscreenButton, 128);
-            addButton(actionBar, disconnectButton, 122);
-            peerName.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
-            actionBar.addView(peerName, new LinearLayout.LayoutParams(0, dp(48), 1));
-        }
+        actionBar = new LinearLayout(this);
+        arrangeCastingActions();
         LinearLayout.LayoutParams actions = wide();
         actions.bottomMargin = dp(10);
         connected.addView(actionBar, actions);
+        playbackRow = new LinearLayout(this);
+        playbackRow.setGravity(Gravity.END);
+        mutePlaybackButton = button("静音", false);
+        mutePlaybackButton.setOnClickListener(view -> {
+            if (service != null && service.hasPlaybackAudio()) {
+                service.togglePlaybackMute();
+            } else {
+                toggleAppAudio();
+            }
+        });
+        addButton(playbackRow, mutePlaybackButton, 154);
+        playbackRow.setVisibility(View.GONE);
+        LinearLayout.LayoutParams audio = wide();
+        audio.bottomMargin = dp(8);
+        connected.addView(playbackRow, audio);
 
         canvas = new FrameLayout(this);
         canvas.setBackground(box(Color.BLACK, BORDER, dp(20)));
@@ -482,21 +529,72 @@ public final class MainActivity extends Activity implements LinkService.Listener
         canvas.addView(fullscreenActions, overlay);
     }
 
+    private void arrangeCastingActions() {
+        View focused = actionBar.findFocus();
+        detachControl(primaryAction);
+        detachControl(stopAction);
+        detachControl(fullscreenButton);
+        detachControl(disconnectButton);
+        detachControl(peerName);
+        actionBar.removeAllViews();
+        actionBar.setOrientation(compact ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        actionBar.setGravity(Gravity.CENTER_VERTICAL);
+        if (compact) {
+            peerName.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+            actionBar.addView(peerName, wide());
+            addCompactRow(primaryAction, stopAction);
+            addCompactRow(fullscreenButton, disconnectButton);
+        } else {
+            addButton(actionBar, primaryAction, 128);
+            addButton(actionBar, stopAction, 136);
+            addButton(actionBar, fullscreenButton, 128);
+            addButton(actionBar, disconnectButton, 122);
+            peerName.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+            actionBar.addView(peerName, new LinearLayout.LayoutParams(0, dp(48), 1));
+        }
+        if (focused != null) {
+            focused.requestFocus();
+        }
+    }
+
+    private static void detachControl(View control) {
+        if (control.getParent() instanceof ViewGroup) {
+            ((ViewGroup) control.getParent()).removeView(control);
+        }
+    }
+
     private void addCompactRow(Button first, Button second) {
         LinearLayout row = new LinearLayout(this);
-        LinearLayout.LayoutParams primary = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
-        primary.rightMargin = dp(8);
-        row.addView(first, primary);
-        row.addView(second, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        addWeightedButton(row, first, true);
+        addWeightedButton(row, second, false);
         LinearLayout.LayoutParams line = wide();
         line.topMargin = dp(6);
         actionBar.addView(row, line);
     }
 
+    private void addWeightedButton(LinearLayout row, Button button, boolean withGap) {
+        LinearLayout.LayoutParams child = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        if (withGap) {
+            child.setMarginEnd(dp(8));
+        }
+        row.addView(button, child);
+    }
+
     private void applyScreenPadding(boolean full) {
         int horizontal = full ? 0 : dp(compact ? 16 : 34);
         int vertical = full ? 0 : dp(compact ? 12 : 22);
-        root.setPadding(horizontal, vertical, horizontal, vertical);
+        if (Build.VERSION.SDK_INT >= 30 && appliedInsets != null) {
+            int types = WindowInsets.Type.displayCutout();
+            if (!full && !television) {
+                types |= WindowInsets.Type.systemBars();
+            }
+            Insets safe = appliedInsets.getInsets(types);
+            root.setPadding(horizontal + safe.left, vertical + safe.top,
+                    horizontal + safe.right, vertical + safe.bottom);
+        } else {
+            root.setPadding(horizontal, vertical, horizontal, vertical);
+        }
     }
 
     private void addPanel(View panel) {
@@ -722,10 +820,11 @@ public final class MainActivity extends Activity implements LinkService.Listener
         requestingCapture = false;
         onStateChanged();
         if (service != null) {
-            service.startCapture(result, data);
+            service.startCapture(result, data, includeAppAudio && hasAppAudioPermission());
         } else if (result == RESULT_OK && data != null) {
             pendingResultCode = result;
             pendingPermission = data;
+            pendingCaptureAudio = includeAppAudio && hasAppAudioPermission();
         }
     }
 
@@ -748,6 +847,8 @@ public final class MainActivity extends Activity implements LinkService.Listener
         setActionEnabled(scanButton, service != null);
         updateVideoSurface();
         updatePlaceholder();
+        setBackCallback(fullscreen || receiving || pairingActive);
+        updatePlaybackControls();
         if (paired) {
             stopAction.setText(receiving ? "停止观看" : "停止投屏");
             setActionEnabled(primaryAction, !receiving && !capturing && !stoppingWatching && !requestingCapture);
@@ -837,6 +938,62 @@ public final class MainActivity extends Activity implements LinkService.Listener
         updatePlaceholder();
     }
 
+    private boolean hasAppAudioPermission() {
+        return Build.VERSION.SDK_INT >= 29
+                && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void toggleAppAudio() {
+        if (Build.VERSION.SDK_INT < 29 || service == null || !service.isConnected()
+                || service.isReceiving() || service.isStoppingWatching() || service.isCapturing()
+                || requestingCapture) {
+            return;
+        }
+        if (hasAppAudioPermission()) {
+            setIncludeAppAudio(!includeAppAudio);
+        } else {
+            new AlertDialog.Builder(this)
+                    .setTitle("发送应用声音")
+                    .setMessage("安卓的录音权限用于采集允许共享的应用播放声音。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("继续", (dialog, which) -> requestPermissions(
+                            new String[]{Manifest.permission.RECORD_AUDIO}, APP_AUDIO_REQUEST))
+                    .show();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == APP_AUDIO_REQUEST && results.length > 0) {
+            setIncludeAppAudio(results[0] == PackageManager.PERMISSION_GRANTED);
+        }
+    }
+
+    private void setIncludeAppAudio(boolean include) {
+        includeAppAudio = include;
+        getSharedPreferences(AUDIO_SETTINGS, MODE_PRIVATE).edit()
+                .putBoolean(INCLUDE_APP_AUDIO, include).apply();
+        updatePlaybackControls();
+    }
+
+    private void updatePlaybackControls() {
+        boolean received = service != null && service.hasPlaybackAudio();
+        boolean canChooseOutgoing = Build.VERSION.SDK_INT >= 29 && service != null
+                && service.isConnected() && !service.isReceiving() && !service.isStoppingWatching()
+                && !service.isCapturing() && !requestingCapture;
+        boolean available = !fullscreen && (received || canChooseOutgoing);
+        playbackRow.setVisibility(available ? View.VISIBLE : View.GONE);
+        disconnectButton.setNextFocusDownId(available ? mutePlaybackButton.getId() : View.NO_ID);
+        mutePlaybackButton.setNextFocusUpId(disconnectButton.getId());
+        if (received) {
+            mutePlaybackButton.setText(service.isPlaybackMuted() ? "取消静音" : "静音");
+        } else if (canChooseOutgoing) {
+            mutePlaybackButton.setText(includeAppAudio && hasAppAudioPermission()
+                    ? "发送应用声音  开" : "发送应用声音  关");
+        }
+    }
+
     private void updatePlaceholder() {
         boolean avcPicture = service != null && service.hasAvcPicture();
         placeholder.setVisibility(lastFrame == null && !avcPicture ? View.VISIBLE : View.GONE);
@@ -850,6 +1007,7 @@ public final class MainActivity extends Activity implements LinkService.Listener
         int controls = next ? View.GONE : View.VISIBLE;
         header.setVisibility(controls);
         actionBar.setVisibility(controls);
+        updatePlaybackControls();
         canvas.setClickable(next);
         display.setFocusableInTouchMode(next);
         display.setFocusable(next);
@@ -891,13 +1049,67 @@ public final class MainActivity extends Activity implements LinkService.Listener
     }
 
     private void updateSystemBars() {
+        Window window = getWindow();
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController bars = window.getInsetsController();
+            if (bars != null) {
+                int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                bars.setSystemBarsAppearance(fullscreen || television ? 0 : mask, mask);
+                bars.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                if (fullscreen || television) {
+                    bars.hide(WindowInsets.Type.systemBars());
+                } else {
+                    bars.show(WindowInsets.Type.systemBars());
+                }
+            }
+            root.requestApplyInsets();
+            return;
+        }
+        if (television) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        }
         int flags = fullscreen ? View.SYSTEM_UI_FLAG_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY : 0;
-        getWindow().getDecorView().setSystemUiVisibility(flags);
+        if (!fullscreen && !television && Build.VERSION.SDK_INT >= 23) {
+            flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        }
+        if (!fullscreen && !television && Build.VERSION.SDK_INT >= 26) {
+            flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        }
+        window.getDecorView().setSystemUiVisibility(flags);
+    }
+
+    private void setBackCallback(boolean active) {
+        if (Build.VERSION.SDK_INT >= 33 && active != backCallbackRegistered) {
+            if (active) {
+                BackApi.register(this);
+            } else {
+                BackApi.unregister(this);
+            }
+            backCallbackRegistered = active;
+        }
+    }
+
+    private Object backCallback;
+
+    private static final class BackApi {
+        static void register(MainActivity activity) {
+            android.window.OnBackInvokedCallback callback = activity::onBackPressed;
+            activity.backCallback = callback;
+            activity.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback);
+        }
+
+        static void unregister(MainActivity activity) {
+            activity.getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(
+                    (android.window.OnBackInvokedCallback) activity.backCallback);
+            activity.backCallback = null;
+        }
     }
 
     @Override

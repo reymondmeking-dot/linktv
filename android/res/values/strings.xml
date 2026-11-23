@@ -9,6 +9,5 @@
         <item name="android:windowSoftInputMode">adjustResize</item>
         <item name="android:statusBarColor">#FFF8F3</item>
         <item name="android:navigationBarColor">#FFF8F3</item>
-        <item name="android:windowFullscreen">true</item>
     </style>
 </resources>

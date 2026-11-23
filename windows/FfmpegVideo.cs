@@ -1,10 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace LinkTV
@@ -14,24 +16,50 @@ namespace LinkTV
         public const int DesktopFps = 60;
         public const int MaxAccessUnitBytes = 2097093;
 
-        public static string FindExecutable()
+        internal sealed class Installation
+        {
+            public readonly string Path;
+            public readonly bool CanDecode;
+            public readonly bool HasNvenc;
+
+            public Installation(string path, bool canDecode, bool hasNvenc)
+            {
+                Path = path;
+                CanDecode = canDecode;
+                HasNvenc = hasNvenc;
+            }
+        }
+
+        public static Installation FindInstallation()
+        {
+            HashSet<string> searched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string candidate in Candidates())
+            {
+                if (!File.Exists(candidate))
+                {
+                    continue;
+                }
+                string path = Path.GetFullPath(candidate);
+                if (searched.Add(path))
+                {
+                    Installation usable = Inspect(path);
+                    if (usable != null)
+                    {
+                        return usable;
+                    }
+                }
+            }
+            return null;
+        }
+
+        private static IEnumerable<string> Candidates()
         {
             string configured = Environment.GetEnvironmentVariable("LINKTV_FFMPEG");
             if (!string.IsNullOrWhiteSpace(configured))
             {
-                string executable = configured.Trim().Trim('"');
-                if (File.Exists(executable))
-                {
-                    return Path.GetFullPath(executable);
-                }
+                yield return configured.Trim().Trim('"');
             }
-
-            string local = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ffmpeg.exe");
-            if (File.Exists(local))
-            {
-                return local;
-            }
-
+            yield return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ffmpeg.exe");
             string search = Environment.GetEnvironmentVariable("PATH") ?? "";
             foreach (string entry in search.Split(Path.PathSeparator))
             {
@@ -41,18 +69,64 @@ namespace LinkTV
                     continue;
                 }
 
+                string candidate;
                 try
                 {
-                    string candidate = Path.Combine(folder, "ffmpeg.exe");
-                    if (File.Exists(candidate))
-                    {
-                        return Path.GetFullPath(candidate);
-                    }
+                    candidate = Path.Combine(folder, "ffmpeg.exe");
                 }
                 catch (ArgumentException)
                 {
-                    // An invalid PATH entry cannot point to a usable executable.
+                    continue;
                 }
+                yield return candidate;
+            }
+        }
+
+        private static Installation Inspect(string executable)
+        {
+            try
+            {
+                using (Process process = Start(executable, "-codecs", false))
+                {
+                    Task<string> output = process.StandardOutput.ReadToEndAsync();
+                    if (!process.WaitForExit(2200))
+                    {
+                        Kill(process);
+                        return null;
+                    }
+                    if (process.ExitCode != 0 || !output.Wait(500))
+                    {
+                        return null;
+                    }
+                    using (StringReader codecs = new StringReader(output.Result))
+                    {
+                        string line;
+                        while ((line = codecs.ReadLine()) != null)
+                        {
+                            string[] fields = line.Trim().Split(new[] { ' ' }, 3, StringSplitOptions.RemoveEmptyEntries);
+                            if (fields.Length < 3 || fields[0].Length != 6 || fields[1] != "h264")
+                            {
+                                continue;
+                            }
+
+                            bool canDecode = fields[0][0] == 'D';
+                            bool hasNvenc = fields[0][1] == 'E' && fields[2].Contains(" h264_nvenc");
+                            return canDecode || hasNvenc ? new Installation(executable, canDecode, hasNvenc) : null;
+                        }
+                    }
+                }
+            }
+            catch (Win32Exception error)
+            {
+                Trace.TraceWarning("LinkTV codec probe: " + error.Message);
+            }
+            catch (InvalidOperationException error)
+            {
+                Trace.TraceWarning("LinkTV codec probe: " + error.Message);
+            }
+            catch (AggregateException error)
+            {
+                Trace.TraceWarning("LinkTV codec probe: " + error.Message);
             }
             return null;
         }

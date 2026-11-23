@@ -144,6 +144,11 @@ final class ProjectionCapture implements ScreenCapture {
     }
 
     @Override
+    public MediaProjection mediaProjection() {
+        return projection;
+    }
+
+    @Override
     public void enableFrames() {
         enabled = true;
     }

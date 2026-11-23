@@ -2,6 +2,7 @@ package lan.linktv;
 
 import android.content.Context;
 import android.content.Intent;
+import android.media.projection.MediaProjection;
 
 interface ScreenCapture {
     interface Listener {
@@ -11,6 +12,7 @@ interface ScreenCapture {
     }
 
     void start(Context context, int resultCode, Intent permission);
+    MediaProjection mediaProjection();
     void enableFrames();
     void updateSize(Context context);
     void stop();

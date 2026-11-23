@@ -25,6 +25,7 @@ namespace LinkTV
         private int pendingBytes;
         private int generation;
         private bool receiving;
+        private bool muted;
         private bool disposed;
 
         public PcmPlayback()
@@ -45,9 +46,32 @@ namespace LinkTV
                 }
 
                 receiving = active;
-                generation++;
-                ClearPending();
-                work.Set();
+                ResetOutput();
+            }
+        }
+
+        public bool IsMuted
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return muted;
+                }
+            }
+        }
+
+        public void SetMuted(bool value)
+        {
+            lock (gate)
+            {
+                if (disposed || muted == value)
+                {
+                    return;
+                }
+
+                muted = value;
+                ResetOutput();
             }
         }
 
@@ -60,7 +84,7 @@ namespace LinkTV
 
             lock (gate)
             {
-                if (disposed || !receiving)
+                if (disposed || !receiving || muted)
                 {
                     return;
                 }
@@ -183,6 +207,14 @@ namespace LinkTV
         {
             pending.Clear();
             pendingBytes = 0;
+        }
+
+        private void ResetOutput()
+        {
+            // The playback worker resets any device buffers for the previous generation.
+            generation++;
+            ClearPending();
+            work.Set();
         }
 
         private static void Check(uint result)
