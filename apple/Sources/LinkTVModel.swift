@@ -34,7 +34,13 @@ final class LinkTVModel: ObservableObject {
     @Published private(set) var prompt: PairingPrompt?
     @Published private(set) var frame: CGImage?
     @Published private(set) var h264Layer: AVSampleBufferDisplayLayer?
+    @Published private(set) var h264Size: CGSize?
+    @Published private(set) var stopViewingPending = false
+    @Published var receiveSoundEnabled = true {
+        didSet { updatePlaybackAudio() }
+    }
     @Published private(set) var message: String?
+    @Published private(set) var discoveryNeedsSettings = false
     @Published private(set) var discoveryMessage = "正在搜索附近的设备…"
 
     private var browser: NWBrowser?
@@ -43,7 +49,8 @@ final class LinkTVModel: ObservableObject {
     private var sessionID: UUID?
     private var media: IncomingMedia?
     private var avcDisplay: AppleVideoDisplay?
-    private var audioVisible = true
+    private var audioVisible = false
+    private var stopViewingTimeout: Task<Void, Never>?
     #if os(macOS)
     private var capture: MacScreenSender?
     #endif
@@ -54,6 +61,12 @@ final class LinkTVModel: ObservableObject {
     #endif
 
     var connectionIsBusy: Bool { phase != .idle }
+
+    var pictureAspectRatio: CGFloat {
+        if let h264Size { return h264Size.width / h264Size.height }
+        if let frame { return CGFloat(frame.width) / CGFloat(frame.height) }
+        return 16 / 9
+    }
 
     private var localName: String {
         #if os(macOS)
@@ -87,6 +100,7 @@ final class LinkTVModel: ObservableObject {
         browser?.cancel()
         browser = nil
         computers = []
+        discoveryNeedsSettings = false
         discoveryMessage = "正在搜索附近的设备…"
         message = nil
         startDiscovery()
@@ -109,11 +123,15 @@ final class LinkTVModel: ObservableObject {
         guard browserID == id else { return }
         switch state {
         case .ready:
+            discoveryNeedsSettings = false
             discoveryMessage = "在同一网络的 Windows 电脑上打开「双向投屏」。"
         case .waiting:
-            discoveryMessage = "等待局域网。如果系统询问，请允许「本地网络」访问。"
+            computers = []
+            discoveryNeedsSettings = true
+            discoveryMessage = "正在等待局域网。请连接到同一网络，并允许「本地网络」访问。"
         case .failed:
             computers = []
+            discoveryNeedsSettings = true
             discoveryMessage = "搜索暂不可用。请检查本地网络权限，再点「重新搜索」。"
         default:
             break
@@ -132,7 +150,7 @@ final class LinkTVModel: ObservableObject {
             self.frame = picture
         }
         let video = AppleVideoDisplay()
-        receiver.setAudible(audioVisible)
+        receiver.setAudible(audioVisible && receiveSoundEnabled)
         let next = LinkWire(endpoint: computer.endpoint, localName: localName, localCapabilities: 3) { [weak self] event in
             if case let .message(type, payload) = event {
                 switch type {
@@ -156,7 +174,34 @@ final class LinkTVModel: ObservableObject {
 
     func setAudioVisible(_ visible: Bool) {
         audioVisible = visible
-        media?.setAudible(visible)
+        updatePlaybackAudio()
+    }
+
+    private func updatePlaybackAudio() {
+        media?.setAudible(audioVisible && receiveSoundEnabled && !stopViewingPending)
+    }
+
+    func stopViewing() {
+        guard phase == .receiving, !stopViewingPending, let wire, let id = sessionID else { return }
+        stopViewingPending = true
+        updatePlaybackAudio()
+        wire.send(type: 0x14)
+        stopViewingTimeout = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 4_000_000_000)
+            } catch {
+                return
+            }
+            guard let self, self.sessionID == id, self.stopViewingPending else { return }
+            self.endConnection("对方未回应停止观看请求，已断开连接。")
+        }
+    }
+
+    private func clearStopViewing() {
+        stopViewingTimeout?.cancel()
+        stopViewingTimeout = nil
+        stopViewingPending = false
+        updatePlaybackAudio()
     }
 
     func respond(approved: Bool) {
@@ -204,19 +249,27 @@ final class LinkTVModel: ObservableObject {
         case .connected:
             prompt = nil
             phase = .connected
-        case let .message(type, _):
+        case let .message(type, payload):
             if type == 0x10 {
                 #if os(macOS)
                 stopMacCapture(notifyRemote: true)
                 #endif
                 frame = nil
                 h264Layer = nil
+                h264Size = nil
+                if !stopViewingPending { message = nil }
                 phase = .receiving
             } else if type == 0x11, phase == .receiving {
+                if stopViewingPending { message = "已停止观看，仍保持连接。" }
+                clearStopViewing()
                 frame = nil
                 h264Layer = nil
+                h264Size = nil
                 phase = .connected
-            } else if type == 0x16, phase == .receiving {
+            } else if type == 0x16, phase == .receiving, payload.count == 6 {
+                let size = Array(payload.prefix(4))
+                h264Size = CGSize(width: CGFloat((Int(size[0]) << 8) | Int(size[1])),
+                                  height: CGFloat((Int(size[2]) << 8) | Int(size[3])))
                 h264Layer = avcDisplay?.layer
             } else if type == 0x14, phase == .sending {
                 #if os(macOS)
@@ -240,7 +293,9 @@ final class LinkTVModel: ObservableObject {
         media = nil
         avcDisplay?.stop()
         avcDisplay = nil
+        clearStopViewing()
         h264Layer = nil
+        h264Size = nil
         prompt = nil
         frame = nil
         peerName = ""
@@ -251,7 +306,11 @@ final class LinkTVModel: ObservableObject {
     #if os(macOS)
     func startMacSharing() {
         guard phase == .connected, let wire else { return }
-        let sender = MacScreenSender(wire: wire)
+        let sender = MacScreenSender(wire: wire) { [weak self] sender, reason in
+            guard let self, self.capture === sender else { return }
+            self.stopMacSharing()
+            self.message = reason
+        }
         capture = sender
         phase = .startingCapture
         message = nil
@@ -268,7 +327,8 @@ final class LinkTVModel: ObservableObject {
                 guard let self, self.capture === sender else { return }
                 self.capture = nil
                 self.phase = .connected
-                self.message = "无法打开屏幕共享。请在系统设置里允许「屏幕录制」后重试。"
+                self.message = (error as? MacScreenSender.CaptureFailure)?.errorDescription
+                    ?? "无法开始屏幕共享。请重试，或检查系统设置中的屏幕录制权限。"
             }
         }
     }
@@ -320,7 +380,7 @@ final class LinkTVModel: ObservableObject {
             return
         }
         if status.phase == "stopped" {
-            clearBroadcast("本机投屏已结束")
+            clearBroadcast(status.reason ?? "本机投屏已结束")
             return
         }
         if let stopRequestedAt = broadcastStopRequestedAt {

@@ -1,4 +1,5 @@
 import AVFoundation
+import QuartzCore
 import SwiftUI
 
 #if os(iOS)
@@ -25,7 +26,10 @@ final class VideoHostView: UIView {
         setNeedsLayout()
     }
 
-    override func layoutSubviews() { super.layoutSubviews(); video.frame = bounds }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        resizeVideo(video, to: bounds)
+    }
 }
 #else
 import AppKit
@@ -52,6 +56,17 @@ final class VideoHostView: NSView {
         needsLayout = true
     }
 
-    override func layout() { super.layout(); video.frame = bounds }
+    override func layout() {
+        super.layout()
+        resizeVideo(video, to: bounds)
+    }
 }
 #endif
+
+private func resizeVideo(_ video: AVSampleBufferDisplayLayer, to bounds: CGRect) {
+    guard video.frame != bounds else { return }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    video.frame = bounds
+    CATransaction.commit()
+}

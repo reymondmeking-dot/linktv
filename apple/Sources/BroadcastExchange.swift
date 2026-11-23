@@ -32,6 +32,7 @@ enum BroadcastExchange {
         let phase: String
         var name: String? = nil
         var code: String? = nil
+        var reason: String? = nil
     }
 
     struct Command: Codable {

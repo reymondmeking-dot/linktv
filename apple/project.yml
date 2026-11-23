@@ -7,8 +7,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: '5.0'
-    MARKETING_VERSION: '2.2.0'
-    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: '2.3.0'
+    CURRENT_PROJECT_VERSION: 2
 targets:
   LinkTV-Mac:
     type: application
@@ -37,6 +37,8 @@ targets:
       properties:
         CFBundleDisplayName: 双向投屏
         UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         NSLocalNetworkUsageDescription: 用于寻找和连接同一个网络里的投屏设备。
         NSBonjourServices: ['_linktv._tcp']
     entitlements:

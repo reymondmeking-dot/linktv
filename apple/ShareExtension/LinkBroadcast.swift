@@ -43,8 +43,8 @@ final class LinkBroadcast: RPBroadcastSampleHandler {
         case let .pairing(name, code): write("pairing", name: name, code: code)
         case .connected: startVideo()
         case let .message(type, _): handleRemoteControl(type)
-        case .disconnected:
-            if !ending { end(rejected ? "已取消配对。" : "投屏连接已结束。") }
+        case let .disconnected(reason):
+            if !ending { end(rejected ? "已取消配对。" : (reason ?? "投屏连接已结束。")) }
         }
     }
 
@@ -95,18 +95,19 @@ final class LinkBroadcast: RPBroadcastSampleHandler {
         queue.async { self.cleanUp() }
     }
 
-    private func write(_ phase: String, name: String? = nil, code: String? = nil) {
+    private func write(_ phase: String, name: String? = nil, code: String? = nil, reason: String? = nil) {
         guard let id = request?.id else { return }
-        try? BroadcastExchange.write(BroadcastExchange.Status(id: id, phase: phase, name: name, code: code), "status.json")
+        try? BroadcastExchange.write(BroadcastExchange.Status(id: id, phase: phase, name: name, code: code, reason: reason), "status.json")
     }
 
     private func end(_ text: String) {
         guard !ending else { return }
-        cleanUp()
+        cleanUp(reason: text)
         finishBroadcastWithError(NSError(domain: "LinkTV.Broadcast", code: 1, userInfo: [NSLocalizedDescriptionKey: text]))
     }
 
-    private func cleanUp() {
+    private func cleanUp(reason: String? = nil) {
+        guard !ending else { return }
         ending = true
         video?.close(notifyPeer: sending)
         video = nil
@@ -115,6 +116,6 @@ final class LinkBroadcast: RPBroadcastSampleHandler {
         timer = nil
         connection?.close()
         connection = nil
-        write("stopped")
+        write("stopped", reason: reason)
     }
 }
