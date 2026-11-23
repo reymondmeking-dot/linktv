@@ -1,0 +1,11 @@
+/android/build/
+/dist/
+/release/
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+*.xcuserstate
+xcuserdata/
+/apple/build/
+.DS_Store

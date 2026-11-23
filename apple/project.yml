@@ -1,0 +1,77 @@
+name: LinkTV
+options:
+  minimumXcodeGenVersion: 2.42.0
+  deploymentTarget:
+    iOS: '16.0'
+    macOS: '13.0'
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    MARKETING_VERSION: '2.2.0'
+    CURRENT_PROJECT_VERSION: 1
+targets:
+  LinkTV-Mac:
+    type: application
+    platform: macOS
+    sources: [Sources, Resources]
+    info:
+      path: Configuration/Mac.plist
+      properties:
+        CFBundleDisplayName: 双向投屏
+        NSLocalNetworkUsageDescription: 用于寻找和连接同一个网络里的投屏设备。
+        NSBonjourServices: ['_linktv._tcp']
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.reymondmeking.linktv.mac
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-Mac
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: 'NO'
+  LinkTV-iPhone:
+    type: application
+    platform: iOS
+    sources: [Sources, Resources]
+    dependencies:
+      - target: LinkTVBroadcast
+        embed: true
+    info:
+      path: Configuration/iPhone.plist
+      properties:
+        CFBundleDisplayName: 双向投屏
+        UILaunchScreen: {}
+        NSLocalNetworkUsageDescription: 用于寻找和连接同一个网络里的投屏设备。
+        NSBonjourServices: ['_linktv._tcp']
+    entitlements:
+      path: Configuration/iPhone.entitlements
+      properties:
+        com.apple.security.application-groups: ['group.io.github.reymondmeking.linktv']
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.reymondmeking.linktv
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-iOS
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: 'NO'
+        TARGETED_DEVICE_FAMILY: '1,2'
+  LinkTVBroadcast:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ShareExtension
+      - Sources/LinkWire.swift
+      - Sources/ScreenJPEG.swift
+      - Sources/AppleH264.swift
+      - Sources/BroadcastExchange.swift
+    info:
+      path: Configuration/Broadcast.plist
+      properties:
+        CFBundleDisplayName: 双向投屏
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).LinkBroadcast
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    entitlements:
+      path: Configuration/Broadcast.entitlements
+      properties:
+        com.apple.security.application-groups: ['group.io.github.reymondmeking.linktv']
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.reymondmeking.linktv.broadcast
+        APPLICATION_EXTENSION_API_ONLY: YES
+        TARGETED_DEVICE_FAMILY: '1,2'

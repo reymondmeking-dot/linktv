@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">双向投屏</string>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:windowBackground">#FFF8F3</item>
+        <item name="android:colorAccent">#A23B70</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:statusBarColor">#FFF8F3</item>
+        <item name="android:navigationBarColor">#FFF8F3</item>
+        <item name="android:windowFullscreen">true</item>
+    </style>
+</resources>
