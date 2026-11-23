@@ -5,6 +5,7 @@ import ReplayKit
 final class LinkBroadcast: RPBroadcastSampleHandler {
     private let queue = DispatchQueue(label: "LinkTV.Broadcast")
     private var video: AppleScreenVideo?
+    private var audio: AppleCapturedPCM?
     private var request: BroadcastExchange.Request?
     private var connection: LinkWire?
     private var timer: DispatchSourceTimer?
@@ -52,6 +53,9 @@ final class LinkBroadcast: RPBroadcastSampleHandler {
         guard let wire = connection else { return }
         let sender = AppleScreenVideo(wire: wire)
         video = sender
+        if request?.shareSound == true {
+            audio = AppleCapturedPCM(send: sender.sendCapturedAudio)
+        }
         sending = true
         sender.enable()
         write("casting")
@@ -82,12 +86,20 @@ final class LinkBroadcast: RPBroadcastSampleHandler {
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
-        guard sampleBufferType == .video else { return }
-        // ReplayKit waits for this callback. Keeping encoding here avoids retaining queued sample buffers.
+        // ReplayKit waits for this callback. Processing here avoids retaining queued sample buffers.
         queue.sync {
             guard sending else { return }
-            let value = CMGetAttachment(sampleBuffer, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber
-            video?.offer(sampleBuffer, orientation: value?.int32Value)
+            switch sampleBufferType {
+            case .video:
+                let value = CMGetAttachment(sampleBuffer, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber
+                video?.offer(sampleBuffer, orientation: value?.int32Value)
+            case .audioApp:
+                audio?.offer(sampleBuffer)
+            case .audioMic:
+                break
+            @unknown default:
+                break
+            }
         }
     }
 
@@ -111,6 +123,7 @@ final class LinkBroadcast: RPBroadcastSampleHandler {
         ending = true
         video?.close(notifyPeer: sending)
         video = nil
+        audio = nil
         sending = false
         timer?.cancel()
         timer = nil

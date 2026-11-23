@@ -59,6 +59,7 @@ targets:
       - Sources/LinkWire.swift
       - Sources/ScreenJPEG.swift
       - Sources/AppleH264.swift
+      - Sources/AppleCapturedPCM.swift
       - Sources/BroadcastExchange.swift
     info:
       path: Configuration/Broadcast.plist

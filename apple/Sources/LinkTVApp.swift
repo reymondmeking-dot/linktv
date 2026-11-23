@@ -138,10 +138,19 @@ private struct LinkTVHome: View {
                 .buttonStyle(.bordered)
             }
             #endif
+            #if os(iOS)
+            if !model.computers.isEmpty { shareSoundToggle }
+            #endif
             ForEach(model.computers) { computer in
                 computerRow(computer)
             }
         }
+    }
+
+    private var shareSoundToggle: some View {
+        Toggle("同步应用声音", isOn: $model.shareSoundEnabled)
+            .toggleStyle(.switch)
+            .foregroundStyle(LinkPalette.ink)
     }
 
     private var nearbyTitle: some View {
@@ -244,6 +253,7 @@ private struct LinkTVHome: View {
             }
             #else
             if model.phase == .connected {
+                shareSoundToggle
                 Button("投屏到设备") { model.startMacSharing() }
                     .buttonStyle(.borderedProminent)
             } else if model.phase == .sending || model.phase == .startingCapture {

@@ -21,13 +21,17 @@ final class MacScreenSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private let video: AppleScreenVideo
-    private let queue = DispatchQueue(label: "LinkTV.MacCapture")
+    private let videoQueue = DispatchQueue(label: "LinkTV.MacCapture")
+    private let audioQueue = DispatchQueue(label: "LinkTV.MacAudioCapture")
+    private let audio: AppleCapturedPCM?
     private let stopped: @MainActor (MacScreenSender, String) -> Void
     @MainActor private var stream: SCStream?
     @MainActor private var cancelled = false
 
-    init(wire: LinkWire, stopped: @escaping @MainActor (MacScreenSender, String) -> Void) {
-        self.video = AppleScreenVideo(wire: wire)
+    init(wire: LinkWire, shareSound: Bool, stopped: @escaping @MainActor (MacScreenSender, String) -> Void) {
+        let video = AppleScreenVideo(wire: wire)
+        self.video = video
+        self.audio = shareSound ? AppleCapturedPCM(send: video.sendCapturedAudio) : nil
         self.stopped = stopped
     }
 
@@ -54,8 +58,17 @@ final class MacScreenSender: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.queueDepth = 3
         configuration.showsCursor = true
+        if audio != nil {
+            configuration.capturesAudio = true
+            configuration.sampleRate = 48_000
+            configuration.channelCount = 2
+            configuration.excludesCurrentProcessAudio = true
+        }
         let capture = SCStream(filter: filter, configuration: configuration, delegate: self)
-        try capture.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+        try capture.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
+        if audio != nil {
+            try capture.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        }
         try await capture.startCapture()
         if cancelled {
             try? await capture.stopCapture()
@@ -89,6 +102,10 @@ final class MacScreenSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
+        if outputType == .audio {
+            audio?.offer(sampleBuffer)
+            return
+        }
         guard outputType == .screen,
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let rawStatus = attachments.first?[.status] as? Int,

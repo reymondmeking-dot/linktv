@@ -36,6 +36,7 @@ final class LinkTVModel: ObservableObject {
     @Published private(set) var h264Layer: AVSampleBufferDisplayLayer?
     @Published private(set) var h264Size: CGSize?
     @Published private(set) var stopViewingPending = false
+    @Published var shareSoundEnabled = false
     @Published var receiveSoundEnabled = true {
         didSet { updatePlaybackAudio() }
     }
@@ -306,7 +307,7 @@ final class LinkTVModel: ObservableObject {
     #if os(macOS)
     func startMacSharing() {
         guard phase == .connected, let wire else { return }
-        let sender = MacScreenSender(wire: wire) { [weak self] sender, reason in
+        let sender = MacScreenSender(wire: wire, shareSound: shareSoundEnabled) { [weak self] sender, reason in
             guard let self, self.capture === sender else { return }
             self.stopMacSharing()
             self.message = reason
@@ -349,7 +350,8 @@ final class LinkTVModel: ObservableObject {
     #if os(iOS)
     func prepareBroadcast(_ computer: NearbyComputer) {
         guard !connectionIsBusy,
-              let request = BroadcastExchange.Request(endpoint: computer.endpoint, localName: localName) else { return }
+              let request = BroadcastExchange.Request(endpoint: computer.endpoint, localName: localName,
+                                                      shareSound: shareSoundEnabled) else { return }
         do {
             try BroadcastExchange.write(request, "request.json")
         } catch {

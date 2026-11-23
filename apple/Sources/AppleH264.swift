@@ -331,6 +331,12 @@ final class AppleScreenVideo {
         if let jpeg = fallback.encode(sample, orientation: orientation) { wire.send(type: 0x12, payload: jpeg) }
     }
 
+    func sendCapturedAudio(_ pcm: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        if active { wire.send(type: 0x13, payload: pcm) }
+    }
+
     func close(notifyPeer: Bool) {
         lock.lock()
         defer { lock.unlock() }

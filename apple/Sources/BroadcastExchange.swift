@@ -12,15 +12,17 @@ enum BroadcastExchange {
         let type: String
         let domain: String
         let localName: String
+        let shareSound: Bool?
         let date: Date
 
-        init?(endpoint: NWEndpoint, localName: String) {
+        init?(endpoint: NWEndpoint, localName: String, shareSound: Bool) {
             guard case let .service(name, type, domain, _) = endpoint else { return nil }
             self.id = UUID()
             self.name = name
             self.type = type
             self.domain = domain
             self.localName = localName
+            self.shareSound = shareSound
             self.date = Date()
         }
 
