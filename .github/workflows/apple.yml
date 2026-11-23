@@ -49,6 +49,10 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/linktv-simulator" \
             CODE_SIGNING_ALLOWED=NO ARCHS=arm64 build
           test -d "$RUNNER_TEMP/linktv-simulator/Build/Products/Release-iphonesimulator/LinkTV-iPhone.app/PlugIns/LinkTVBroadcast.appex"
+      - name: Verify the application audio conversion
+        run: |
+          xcrun swiftc Sources/AppleCapturedPCM.swift Tests/PCMConversionSmoke.swift -o "$RUNNER_TEMP/pcm-conversion"
+          "$RUNNER_TEMP/pcm-conversion"
       - name: Build for Apple silicon and Intel Macs
         run: |
           xcodebuild -project LinkTV.xcodeproj -scheme LinkTV-Mac \
