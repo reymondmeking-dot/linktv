@@ -21,47 +21,49 @@ concurrency:
 
 jobs:
   build:
+    name: macOS, iPhone and iOS Simulator
     runs-on: macos-15
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS
-            scheme: LinkTV-Mac
-            destination: generic/platform=macOS
-            architectures: arm64 x86_64
-          - name: iOS
-            scheme: LinkTV-iPhone
-            destination: generic/platform=iOS
-            architectures: arm64
-          - name: iOS Simulator
-            scheme: LinkTV-iPhone
-            destination: generic/platform=iOS Simulator
-            architectures: arm64
-    name: ${{ matrix.name }}
+    defaults:
+      run:
+        working-directory: apple
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - name: Generate Xcode project
-        working-directory: apple
         run: |
           brew install xcodegen
           xcodegen generate
-      - name: Build app
-        working-directory: apple
-        env:
-          SCHEME: ${{ matrix.scheme }}
-          DESTINATION: ${{ matrix.destination }}
-          ARCHITECTURES: ${{ matrix.architectures }}
+      - name: Build iPhone and its broadcast extension
         run: |
-          xcodebuild -project LinkTV.xcodeproj -scheme "$SCHEME" \
-            -configuration Release -destination "$DESTINATION" \
-            -derivedDataPath "$RUNNER_TEMP/linktv-build" \
-            CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=NO ARCHS="$ARCHITECTURES" build
-      - name: Verify broadcast extension is embedded
-        if: matrix.scheme == 'LinkTV-iPhone'
+          xcodebuild -project LinkTV.xcodeproj -scheme LinkTV-iPhone \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/linktv-ios" \
+            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 build
+          test -d "$RUNNER_TEMP/linktv-ios/Build/Products/Release-iphoneos/LinkTV-iPhone.app/PlugIns/LinkTVBroadcast.appex"
+      - name: Build for iOS Simulator
         run: |
-          app=$(find "$RUNNER_TEMP/linktv-build/Build/Products" -type d -name 'LinkTV-iPhone.app' -print -quit)
-          test -n "$app" && test -d "$app/PlugIns/LinkTVBroadcast.appex"
+          xcodebuild -project LinkTV.xcodeproj -scheme LinkTV-iPhone \
+            -configuration Release -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/linktv-simulator" \
+            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 build
+          test -d "$RUNNER_TEMP/linktv-simulator/Build/Products/Release-iphonesimulator/LinkTV-iPhone.app/PlugIns/LinkTVBroadcast.appex"
+      - name: Build for Apple silicon and Intel Macs
+        run: |
+          xcodebuild -project LinkTV.xcodeproj -scheme LinkTV-Mac \
+            -configuration Release -destination 'generic/platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/linktv-mac" \
+            CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=NO 'ARCHS=arm64 x86_64' build
+          app="$RUNNER_TEMP/linktv-mac/Build/Products/Release/LinkTV-Mac.app"
+          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/LinkTV-Mac"
+          codesign --force --sign - "$app"
+          codesign --verify --strict "$app"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/LinkTV-Mac-preview.zip"
+      - name: Upload Mac preview build
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v6
+        with:
+          name: LinkTV-Mac-preview
+          path: ${{ runner.temp }}/LinkTV-Mac-preview.zip
+          if-no-files-found: error
