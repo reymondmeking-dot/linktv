@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -16,9 +18,9 @@ namespace LinkTV
     internal sealed class CastWindow : Form
     {
         private const int Port = 17863;
-        private const int CardPadding = 19;
-        private const int AudioInset = 18;
-        private const int AudioGap = 12;
+        private const int CardPadding = 17;
+        private const int SidebarWidth = 320;
+        private const int StatusWidth = 208;
         private static readonly Color Background = Color.FromArgb(255, 248, 243);
         private static readonly Color Blush = Color.FromArgb(252, 224, 236);
         private static readonly Color Lavender = Color.FromArgb(237, 226, 250);
@@ -27,20 +29,25 @@ namespace LinkTV
         private static readonly Color Accent = Color.FromArgb(162, 59, 112);
         private static readonly Color PreviewBackground = Color.FromArgb(48, 34, 57);
         private static readonly Color DisabledFill = Color.FromArgb(240, 229, 240);
+        private static readonly Color AudioFill = Color.FromArgb(252, 239, 247);
+        private static readonly Color PairingFill = Color.FromArgb(252, 240, 249);
 
         private readonly ListBox deviceList = new ListBox();
-        private readonly Label emptyDevices = MakeLabel("正在查找附近设备…", 10, FontStyle.Regular, Muted);
+        private readonly Label emptyDevices = MakeWrappedLabel("正在查找附近设备…", 10, FontStyle.Regular, Muted, Background);
         private readonly Button connectButton = MakeButton("连接设备", false);
         private readonly Button confirmButton = MakeButton("确认", true);
         private readonly Button cancelButton = MakeButton("取消", false);
-        private readonly Label pairingTitle = MakeLabel("", 11, FontStyle.Bold, Ink);
+        private readonly Label pairingTitle = MakeWrappedLabel("", 11, FontStyle.Bold, Ink, PairingFill);
         private readonly Label pairingNumber = MakeLabel("", 24, FontStyle.Bold, Accent);
-        private readonly Label pairingHelp = MakeLabel("", 9, FontStyle.Regular, Muted);
+        private readonly Label pairingHelp = MakeWrappedLabel("", 9, FontStyle.Regular, Muted, PairingFill);
         private readonly Button sendButton = MakeButton("投屏到设备", true);
         private readonly CheckBox syncAudioOption = MakeAudioOption("同步本机声音");
         private readonly CheckBox muteComputerOption = MakeAudioOption("本机静音");
-        private readonly Label helpText = MakeLabel("", 9, FontStyle.Regular, Muted);
-        private readonly Label connectionStatus = MakeLabel("正在检查网络", 10, FontStyle.Regular, Muted);
+        private readonly Label syncAudioLabel = MakeLabel("同步本机声音", 9, FontStyle.Regular, Ink);
+        private readonly Label muteComputerLabel = MakeLabel("本机静音", 9, FontStyle.Regular, Ink);
+        private readonly Label helpText = MakeWrappedLabel("", 9, FontStyle.Regular, Muted, Color.White);
+        private readonly Label connectionStatus = MakeWrappedLabel("正在检查网络", 10, FontStyle.Regular, Muted, Lavender);
+        private readonly ToolTip statusTooltip = new ToolTip();
         private readonly PictureBox picture = new PictureBox();
         private readonly SoftSurface previewIdle = new SoftSurface(Blush, Lavender, 20);
         private readonly TableLayoutPanel previewMessage = new TableLayoutPanel();
@@ -54,7 +61,14 @@ namespace LinkTV
         private TableLayoutPanel discoveryPanel;
         private TableLayoutPanel pairingPanel;
         private TableLayoutPanel sidebarLayout;
+        private TableLayoutPanel shellLayout;
+        private SoftSurface statusBadge;
+        private StatusViewport deviceStatusSurface;
+        private StatusViewport helpStatusSurface;
+        private Label discoveryTip;
         private Panel audioOptions;
+        private int headerMinimum;
+        private int discoveryTipHeight;
         private int sendHeight;
         private int audioOptionsHeight;
         private CastHub hub;
@@ -106,13 +120,10 @@ namespace LinkTV
             SetStyle(ControlStyles.ResizeRedraw, true);
 
             SuspendLayout();
-            int inlineAudioWidth = syncAudioOption.GetPreferredSize(Size.Empty).Width
-                + muteComputerOption.GetPreferredSize(Size.Empty).Width + AudioGap + AudioInset;
-            int sidebarWidth = Math.Max(300, Math.Min(400, inlineAudioWidth + CardPadding * 2));
-            bool stackAudio = sidebarWidth < inlineAudioWidth + CardPadding * 2;
             TableLayoutPanel shell = NewTable(3, 2);
+            shellLayout = shell;
             shell.Padding = new Padding(26, 16, 26, 26);
-            shell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, sidebarWidth));
+            shell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, SidebarWidth));
             shell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 18));
             shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             int headerHeight;
@@ -122,7 +133,7 @@ namespace LinkTV
 
             shell.Controls.Add(header, 0, 0);
             shell.SetColumnSpan(header, 3);
-            shell.Controls.Add(BuildPairingCard(sidebarWidth - 2 * CardPadding, stackAudio), 0, 1);
+            shell.Controls.Add(BuildPairingCard(SidebarWidth - 2 * CardPadding), 0, 1);
             shell.Controls.Add(BuildPreview(), 2, 1);
             Controls.Add(shell);
             ResumeLayout();
@@ -191,6 +202,10 @@ namespace LinkTV
         protected override void Dispose(bool disposing)
         {
             base.Dispose(disposing);
+            if (disposing)
+            {
+                statusTooltip.Dispose();
+            }
             if (disposing && appIcon != null)
             {
                 appIcon.Dispose();
@@ -202,39 +217,47 @@ namespace LinkTV
         {
             TableLayoutPanel header = NewTable(2, 1);
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 208));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, StatusWidth));
             header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Label title = MakeLabel("双向投屏", 26, FontStyle.Bold, Ink);
             title.TextAlign = ContentAlignment.MiddleLeft;
             connectionStatus.TextAlign = ContentAlignment.MiddleCenter;
-            connectionStatus.AutoEllipsis = true;
-            SoftSurface status = new SoftSurface(Lavender, Blush, 16);
-            int statusHeight = PreferredHeight(connectionStatus, 208) + 16;
-            height = Math.Max(68, Math.Max(PreferredHeight(title, 0), statusHeight) + 18);
-            int inset = (height - statusHeight) / 2;
-            status.Margin = new Padding(0, inset, 0, height - statusHeight - inset);
-            status.Controls.Add(connectionStatus);
+            connectionStatus.Padding = new Padding(12, 7, 12, 7);
+            statusBadge = new SoftSurface(Lavender, Lavender, 16);
+            headerMinimum = Math.Max(68, PreferredHeight(title, 0) + 12);
+            height = headerMinimum;
+            statusBadge.Controls.Add(connectionStatus);
             header.Controls.Add(title, 0, 0);
-            header.Controls.Add(status, 1, 0);
+            header.Controls.Add(statusBadge, 1, 0);
             return header;
         }
 
-        private Panel BuildPairingCard(int width, bool stackAudio)
+        private void ArrangeHeader()
+        {
+            int statusHeight = PreferredHeight(connectionStatus, StatusWidth);
+            int height = Math.Max(headerMinimum, statusHeight + 10);
+            int top = (height - statusHeight) / 2;
+            shellLayout.RowStyles[0].Height = height;
+            statusBadge.Margin = new Padding(0, top, 0, height - statusHeight - top);
+        }
+
+        private Panel BuildPairingCard(int width)
         {
             Panel surface = WhiteCard();
             TableLayoutPanel form = NewTable(1, 8);
             sidebarLayout = form;
             form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             Label title = MakeLabel("附近设备", 15, FontStyle.Bold, Ink);
-            Label tip = MakeLabel("在对方设备打开「双向投屏」。", 9, FontStyle.Regular, Muted);
+            discoveryTip = MakeLabel("在对方设备打开「双向投屏」。", 9, FontStyle.Regular, Muted);
+            discoveryTipHeight = PreferredHeight(discoveryTip, width) + 8;
             sendHeight = Math.Max(42, PreferredHeight(sendButton, width) + 6);
-            audioOptions = BuildAudioOptions(stackAudio);
-            AddFixedRows(form, PreferredHeight(title, width) + 6, PreferredHeight(tip, width) + 9);
+            audioOptions = BuildAudioOptions();
+            AddFixedRows(form, PreferredHeight(title, width) + 4, discoveryTipHeight);
             form.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            AddFixedRows(form, 12, sendHeight, 10, audioOptionsHeight, 0);
+            AddFixedRows(form, 8, sendHeight, 8, audioOptionsHeight, 0);
 
             AddWide(form, title, 0);
-            AddWide(form, tip, 1);
+            AddWide(form, discoveryTip, 1);
             Panel modePanel = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Color.Transparent };
             discoveryPanel = BuildDiscoveryPanel();
             pairingPanel = BuildConfirmationPanel(width);
@@ -246,41 +269,49 @@ namespace LinkTV
             AddWide(form, sendButton, 4);
             AddWide(form, audioOptions, 6);
             helpText.Padding = new Padding(0, 9, 0, 0);
-            AddWide(form, helpText, 7);
+            helpStatusSurface = new StatusViewport(helpText, Color.White);
+            AddWide(form, helpStatusSurface, 7);
+            form.SizeChanged += (sender, args) =>
+                ArrangeSidebar(pairingPeer != null || invitedName != null, hub != null && hub.IsConnected);
 
             surface.Controls.Add(form);
             return surface;
         }
 
-        private Panel BuildAudioOptions(bool stacked)
+        private Panel BuildAudioOptions()
         {
-            SoftSurface surface = new SoftSurface(Background, Color.FromArgb(252, 239, 247), 14);
-            surface.Padding = new Padding(10, 0, 8, 0);
-            int lineHeight = Math.Max(PreferredHeight(syncAudioOption, 0), PreferredHeight(muteComputerOption, 0));
-            TableLayoutPanel options;
-            if (stacked)
-            {
-                options = NewTable(1, 2);
-                options.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-                options.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-                options.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-                options.Controls.Add(syncAudioOption, 0, 0);
-                options.Controls.Add(muteComputerOption, 0, 1);
-                audioOptionsHeight = lineHeight * 2 + 12;
-            }
-            else
-            {
-                options = NewTable(3, 1);
-                options.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-                options.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, syncAudioOption.GetPreferredSize(Size.Empty).Width));
-                options.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, AudioGap));
-                options.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-                options.Controls.Add(syncAudioOption, 0, 0);
-                options.Controls.Add(muteComputerOption, 2, 0);
-                audioOptionsHeight = Math.Max(42, lineHeight + 12);
-            }
+            SoftSurface surface = new SoftSurface(AudioFill, AudioFill, 14);
+            surface.Padding = new Padding(12, 7, 12, 7);
+            TableLayoutPanel options = NewTable(2, 3);
+            options.BackColor = AudioFill;
+            int checkWidth = Math.Max(syncAudioOption.GetPreferredSize(Size.Empty).Width,
+                muteComputerOption.GetPreferredSize(Size.Empty).Width) + 8;
+            options.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, checkWidth));
+            options.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            int rowHeight = 4 + Math.Max(26, Math.Max(PreferredHeight(syncAudioLabel, 0), PreferredHeight(muteComputerLabel, 0)));
+            AddFixedRows(options, rowHeight, 3, rowHeight);
+            audioOptionsHeight = surface.Padding.Vertical + rowHeight * 2 + 3;
+            AddAudioOption(options, syncAudioOption, syncAudioLabel, 0);
+            AddAudioOption(options, muteComputerOption, muteComputerLabel, 2);
             surface.Controls.Add(options);
             return surface;
+        }
+
+        private static void AddAudioOption(TableLayoutPanel options, CheckBox check, Label caption, int row)
+        {
+            caption.BackColor = AudioFill;
+            caption.TextAlign = ContentAlignment.MiddleLeft;
+            caption.UseMnemonic = false;
+            caption.Click += (sender, args) =>
+            {
+                if (check.Enabled)
+                {
+                    check.Focus();
+                    check.Checked = !check.Checked;
+                }
+            };
+            options.Controls.Add(check, 0, row);
+            options.Controls.Add(caption, 1, row);
         }
 
         private TableLayoutPanel BuildDiscoveryPanel()
@@ -290,7 +321,7 @@ namespace LinkTV
             table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             AddFixedRows(table, 9, Math.Max(39, PreferredHeight(connectButton, 0) + 6));
 
-            SoftSurface listArea = new SoftSurface(Background, Color.FromArgb(252, 243, 251), 17);
+            SoftSurface listArea = new SoftSurface(Background, Background, 17);
             deviceList.Dock = DockStyle.Fill;
             deviceList.Margin = Padding.Empty;
             deviceList.BorderStyle = BorderStyle.None;
@@ -302,10 +333,10 @@ namespace LinkTV
             deviceList.DrawItem += DrawDevice;
             deviceList.AccessibleName = "附近设备";
             emptyDevices.TextAlign = ContentAlignment.MiddleCenter;
-            emptyDevices.AutoEllipsis = true;
+            emptyDevices.Padding = new Padding(12, 6, 12, 6);
+            deviceStatusSurface = new StatusViewport(emptyDevices, Background);
             listArea.Controls.Add(deviceList);
-            listArea.Controls.Add(emptyDevices);
-            emptyDevices.BringToFront();
+            listArea.Controls.Add(deviceStatusSurface);
 
             table.Controls.Add(listArea, 0, 0);
             table.Controls.Add(connectButton, 0, 2);
@@ -348,14 +379,14 @@ namespace LinkTV
         private TableLayoutPanel BuildConfirmationPanel(int width)
         {
             TableLayoutPanel table = NewTable(3, 6);
-            table.BackColor = Color.FromArgb(252, 240, 249);
+            table.BackColor = PairingFill;
             table.Padding = new Padding(11, 9, 11, 9);
             table.SizeChanged += (sender, args) => SetRoundedRegion(table, 17);
             table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 8));
             table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             pairingTitle.Text = "连接设备";
-            pairingTitle.AutoEllipsis = true;
+            pairingNumber.BackColor = PairingFill;
             pairingNumber.AccessibleName = "核对号码";
             pairingNumber.TextAlign = ContentAlignment.MiddleCenter;
             pairingHelp.Text = "两边号码相同，请在两台设备上各点一次确认。";
@@ -370,7 +401,28 @@ namespace LinkTV
             AddWide(table, pairingHelp, 2);
             table.Controls.Add(cancelButton, 0, 5);
             table.Controls.Add(confirmButton, 2, 5);
+            table.SizeChanged += ArrangePairingText;
+            pairingTitle.TextChanged += ArrangePairingText;
+            pairingHelp.TextChanged += ArrangePairingText;
             return table;
+        }
+
+        private void ArrangePairingText(object sender, EventArgs e)
+        {
+            if (pairingPanel == null || pairingPanel.Width <= pairingPanel.Padding.Horizontal)
+            {
+                return;
+            }
+            int width = pairingPanel.Width - pairingPanel.Padding.Horizontal;
+            int height = pairingPanel.Height - pairingPanel.Padding.Vertical;
+            int hintHeight = PreferredHeight(pairingHelp, width) + 4;
+            int remaining = height - hintHeight - (int)(pairingPanel.RowStyles[1].Height
+                + pairingPanel.RowStyles[3].Height + pairingPanel.RowStyles[5].Height);
+            pairingPanel.SuspendLayout();
+            pairingPanel.RowStyles[0].Height = Math.Max(0, Math.Min(remaining, PreferredHeight(pairingTitle, width) + 4));
+            pairingPanel.RowStyles[2].Height = hintHeight;
+            pairingPanel.ResumeLayout();
+            statusTooltip.SetToolTip(pairingTitle, pairingTitle.Text);
         }
 
         private Panel BuildPreview()
@@ -1262,15 +1314,27 @@ namespace LinkTV
 
             connectionStatus.Text = hub == null ? "网络未就绪" : screenState;
             connectionStatus.ForeColor = connected || pairing ? Accent : Ink;
+            ArrangeHeader();
             connectButton.Text = hub == null ? "重新检查网络" : connected ? "断开连接" : "连接设备";
             connectButton.Enabled = hub == null || connected || deviceList.SelectedItem != null;
             emptyDevices.Text = connected
                 ? connectedName ?? "已连接"
                 : hub == null ? "还未连接到局域网" : "正在查找附近设备…";
-            emptyDevices.Visible = connected || hub == null || deviceList.Items.Count == 0;
+            bool showDeviceStatus = connected || hub == null || deviceList.Items.Count == 0;
+            deviceList.Visible = !showDeviceStatus;
+            deviceStatusSurface.Visible = showDeviceStatus;
+            if (showDeviceStatus)
+            {
+                statusTooltip.SetToolTip(emptyDevices, emptyDevices.Text);
+                deviceStatusSurface.FitContent();
+            }
             deviceList.Enabled = !connected;
             syncAudioOption.Enabled = audioSupported && !sending && !receiving;
             muteComputerOption.Enabled = audioSupported && syncAudioOption.Checked && !receiving && !stopping;
+            syncAudioLabel.ForeColor = syncAudioOption.Enabled ? Ink : Muted;
+            syncAudioLabel.Cursor = syncAudioOption.Enabled ? Cursors.Hand : Cursors.Default;
+            muteComputerLabel.ForeColor = muteComputerOption.Enabled ? Ink : Muted;
+            muteComputerLabel.Cursor = muteComputerOption.Enabled ? Cursors.Hand : Cursors.Default;
             string audioHint = null;
             if (connected && !audioSupported)
             {
@@ -1278,11 +1342,11 @@ namespace LinkTV
             }
             else if (sending && !stopping && muteComputerOption.Checked && !audioReady)
             {
-                audioHint = "开始同步声音后，电脑会自动静音。";
+                audioHint = "同步声音后将静音本机。";
             }
-            helpText.Text = operationMessage ?? audioWarning ?? audioHint
-                ?? (connected ? "在对方设备上选「投屏到设备」即可接收画面。" : "");
-            ArrangeSidebar(pairing);
+            helpText.Text = operationMessage ?? audioWarning ?? audioHint ?? "";
+            statusTooltip.SetToolTip(helpText, helpText.Text);
+            ArrangeSidebar(pairing, connected);
 
             if (receiving)
             {
@@ -1303,21 +1367,41 @@ namespace LinkTV
             previewIdle.Visible = !receiving || picture.Image == null;
         }
 
-        private void ArrangeSidebar(bool pairing)
+        private void ArrangeSidebar(bool pairing, bool connected)
         {
             sidebarLayout.SuspendLayout();
+            bool showHint = !pairing && !connected;
+            discoveryTip.Visible = showHint;
+            sidebarLayout.RowStyles[1].Height = showHint ? discoveryTipHeight : 0;
             sendButton.Visible = !pairing;
             audioOptions.Visible = !pairing;
-            helpText.Visible = !pairing && helpText.Text.Length != 0;
-            sidebarLayout.RowStyles[3].Height = pairing ? 0 : 12;
+            bool showHelp = !pairing && helpText.Text.Length != 0;
+            helpStatusSurface.Visible = showHelp;
+            sidebarLayout.RowStyles[3].Height = pairing ? 0 : 8;
             sidebarLayout.RowStyles[4].Height = pairing ? 0 : sendHeight;
-            sidebarLayout.RowStyles[5].Height = pairing ? 0 : 10;
+            sidebarLayout.RowStyles[5].Height = pairing ? 0 : 8;
             sidebarLayout.RowStyles[6].Height = pairing ? 0 : audioOptionsHeight;
             int width = Math.Max(1, sidebarLayout.ClientSize.Width);
-            sidebarLayout.RowStyles[7].Height = pairing || helpText.Text.Length == 0
-                ? 0
-                : PreferredHeight(helpText, width) + 4;
+            int helpHeight = 0;
+            if (showHelp)
+            {
+                int required = PreferredHeight(helpText, width) + 4;
+                int deviceFloor = connected
+                    ? Math.Max(deviceList.ItemHeight, Math.Min(88, PreferredHeight(emptyDevices, width)))
+                    : deviceList.ItemHeight;
+                int occupied = (int)(sidebarLayout.RowStyles[0].Height + sidebarLayout.RowStyles[1].Height
+                    + sidebarLayout.RowStyles[3].Height + sidebarLayout.RowStyles[4].Height
+                    + sidebarLayout.RowStyles[5].Height + sidebarLayout.RowStyles[6].Height
+                    + discoveryPanel.RowStyles[1].Height + discoveryPanel.RowStyles[2].Height) + deviceFloor;
+                int oneLine = TextRenderer.MeasureText("状态", helpText.Font).Height + helpText.Padding.Vertical + 4;
+                helpHeight = Math.Min(required, Math.Max(oneLine, sidebarLayout.ClientSize.Height - occupied));
+            }
+            sidebarLayout.RowStyles[7].Height = helpHeight;
             sidebarLayout.ResumeLayout();
+            if (showHelp)
+            {
+                helpStatusSurface.FitContent();
+            }
         }
 
         private bool PostToUi(Action callback)
@@ -1353,7 +1437,7 @@ namespace LinkTV
 
         private static Panel WhiteCard()
         {
-            return new SoftSurface(Color.White, Color.FromArgb(255, 252, 253), 24) { Padding = new Padding(CardPadding) };
+            return new SoftSurface(Color.White, Color.White, 24) { Padding = new Padding(CardPadding) };
         }
 
         private static int PreferredHeight(Control control, int width)
@@ -1389,6 +1473,176 @@ namespace LinkTV
             };
         }
 
+        private static Label MakeWrappedLabel(string text, float size, FontStyle style, Color color, Color background)
+        {
+            return new WrappedLabel
+            {
+                Text = text,
+                Font = new Font("Microsoft YaHei UI", size, style),
+                ForeColor = color,
+                BackColor = background,
+                Dock = DockStyle.Fill,
+                Margin = Padding.Empty,
+                TextAlign = ContentAlignment.TopLeft,
+                UseMnemonic = false
+            };
+        }
+
+        private sealed class WrappedLabel : Label
+        {
+            private const TextFormatFlags LineFlags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine
+                | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping;
+            private const string ClosingPunctuation = "。！？，；：、）》」』】〕〉％…";
+
+            public WrappedLabel()
+            {
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            }
+
+            public override Size GetPreferredSize(Size proposedSize)
+            {
+                int width = proposedSize.Width <= 0 ? int.MaxValue : Math.Max(1, proposedSize.Width - Padding.Horizontal);
+                List<string> lines = Wrap(width);
+                int widest = 0;
+                foreach (string line in lines)
+                {
+                    widest = Math.Max(widest, Measure(line).Width);
+                }
+                return new Size(widest + Padding.Horizontal, lines.Count * LineHeight() + Padding.Vertical);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Rectangle area = new Rectangle(Padding.Left, Padding.Top,
+                    Math.Max(0, Width - Padding.Horizontal), Math.Max(0, Height - Padding.Vertical));
+                int lineHeight = LineHeight();
+                if (area.Width == 0 || area.Height < lineHeight)
+                {
+                    return;
+                }
+                List<string> lines = Wrap(area.Width);
+                bool centered = TextAlign == ContentAlignment.MiddleCenter;
+                int y = area.Top + (centered ? Math.Max(0, (area.Height - lines.Count * lineHeight) / 2) : 0);
+                TextFormatFlags flags = LineFlags | (centered ? TextFormatFlags.HorizontalCenter : TextFormatFlags.Left);
+                foreach (string line in lines)
+                {
+                    if (y + lineHeight > area.Bottom)
+                    {
+                        break;
+                    }
+                    TextRenderer.DrawText(e.Graphics, line, Font, new Rectangle(area.Left, y, area.Width, lineHeight),
+                        ForeColor, flags);
+                    y += lineHeight;
+                }
+            }
+
+            private int LineHeight()
+            {
+                return Measure("Hg国").Height;
+            }
+
+            private Size Measure(string text)
+            {
+                return TextRenderer.MeasureText(text, Font, Size.Empty, LineFlags);
+            }
+
+            private List<string> Wrap(int width)
+            {
+                List<string> result = new List<string>();
+                if (Text.Length == 0)
+                {
+                    return result;
+                }
+                foreach (string paragraph in Text.Replace("\r", "").Split('\n'))
+                {
+                    string current = "";
+                    TextElementEnumerator elements = StringInfo.GetTextElementEnumerator(paragraph);
+                    while (elements.MoveNext())
+                    {
+                        string element = elements.GetTextElement();
+                        if (current.Length != 0 && Measure(current + element).Width > width)
+                        {
+                            if (ClosingPunctuation.IndexOf(element, StringComparison.Ordinal) >= 0)
+                            {
+                                string previous = current.TrimEnd();
+                                int[] positions = StringInfo.ParseCombiningCharacters(previous);
+                                if (positions.Length > 1)
+                                {
+                                    int last = positions[positions.Length - 1];
+                                    string tail = previous.Substring(last) + element;
+                                    if (Measure(tail).Width <= width)
+                                    {
+                                        result.Add(previous.Substring(0, last).TrimEnd());
+                                        current = tail;
+                                        continue;
+                                    }
+                                }
+                            }
+                            int breakAt = current.LastIndexOf(' ');
+                            if (breakAt >= current.Length / 2 && breakAt > 0)
+                            {
+                                result.Add(current.Substring(0, breakAt));
+                                current = current.Substring(breakAt + 1);
+                            }
+                            else
+                            {
+                                result.Add(current.TrimEnd());
+                                current = "";
+                            }
+                        }
+                        if (current.Length != 0 || !string.IsNullOrWhiteSpace(element))
+                        {
+                            current += element;
+                        }
+                    }
+                    result.Add(current.TrimEnd());
+                }
+                return result;
+            }
+        }
+
+        private sealed class StatusViewport : Panel
+        {
+            private readonly Label content;
+            private bool arranging;
+
+            public StatusViewport(Label content, Color fill)
+            {
+                this.content = content;
+                BackColor = fill;
+                Dock = DockStyle.Fill;
+                Margin = Padding.Empty;
+                AutoScroll = true;
+                content.Dock = DockStyle.Top;
+                Controls.Add(content);
+                content.TextChanged += (sender, args) => FitContent();
+                SizeChanged += (sender, args) => FitContent();
+            }
+
+            public void FitContent()
+            {
+                if (arranging || Width < 1 || Height < 1)
+                {
+                    return;
+                }
+                arranging = true;
+                try
+                {
+                    int required = PreferredHeight(content, Width);
+                    if (required > Height)
+                    {
+                        required = PreferredHeight(content, Math.Max(1, Width - SystemInformation.VerticalScrollBarWidth));
+                    }
+                    content.Height = Math.Max(Height, required);
+                    AutoScrollMinSize = required > Height ? new Size(0, required) : Size.Empty;
+                }
+                finally
+                {
+                    arranging = false;
+                }
+            }
+        }
+
         private static Button MakeButton(string text, bool primary)
         {
             Button button = new SoftButton
@@ -1411,12 +1665,13 @@ namespace LinkTV
 
         private static CheckBox MakeAudioOption(string text)
         {
-            return new SoftCheckBox
+            return new CheckBox
             {
-                Text = text,
+                AccessibleName = text,
+                Text = "",
                 Dock = DockStyle.Fill,
                 Margin = Padding.Empty,
-                BackColor = Color.Transparent,
+                BackColor = AudioFill,
                 ForeColor = Ink,
                 Font = new Font("Microsoft YaHei UI", 9, FontStyle.Regular),
                 CheckAlign = ContentAlignment.MiddleLeft,
@@ -1438,28 +1693,6 @@ namespace LinkTV
                 e.Graphics.Clear(DisabledFill);
                 TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, Muted,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
-            }
-        }
-
-        private sealed class SoftCheckBox : CheckBox
-        {
-            protected override void OnPaint(PaintEventArgs e)
-            {
-                if (Enabled)
-                {
-                    base.OnPaint(e);
-                    return;
-                }
-
-                System.Windows.Forms.VisualStyles.CheckBoxState state = Checked
-                    ? System.Windows.Forms.VisualStyles.CheckBoxState.CheckedDisabled
-                    : System.Windows.Forms.VisualStyles.CheckBoxState.UncheckedDisabled;
-                Size glyph = CheckBoxRenderer.GetGlyphSize(e.Graphics, state);
-                CheckBoxRenderer.DrawCheckBox(e.Graphics, new Point(0, (Height - glyph.Height) / 2), state);
-                int textLeft = glyph.Width + 5;
-                Rectangle text = Rectangle.FromLTRB(textLeft, 0, Math.Max(textLeft, Width), Height);
-                TextRenderer.DrawText(e.Graphics, Text, Font, text, Muted,
-                    TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             }
         }
 
