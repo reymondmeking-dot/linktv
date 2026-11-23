@@ -1,0 +1,67 @@
+name: Apple builds
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apple/**'
+      - '.github/workflows/apple.yml'
+  pull_request:
+    paths:
+      - 'apple/**'
+      - '.github/workflows/apple.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            scheme: LinkTV-Mac
+            destination: generic/platform=macOS
+            architectures: arm64 x86_64
+          - name: iOS
+            scheme: LinkTV-iPhone
+            destination: generic/platform=iOS
+            architectures: arm64
+          - name: iOS Simulator
+            scheme: LinkTV-iPhone
+            destination: generic/platform=iOS Simulator
+            architectures: arm64
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Generate Xcode project
+        working-directory: apple
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Build app
+        working-directory: apple
+        env:
+          SCHEME: ${{ matrix.scheme }}
+          DESTINATION: ${{ matrix.destination }}
+          ARCHITECTURES: ${{ matrix.architectures }}
+        run: |
+          xcodebuild -project LinkTV.xcodeproj -scheme "$SCHEME" \
+            -configuration Release -destination "$DESTINATION" \
+            -derivedDataPath "$RUNNER_TEMP/linktv-build" \
+            CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=NO ARCHS="$ARCHITECTURES" build
+      - name: Verify broadcast extension is embedded
+        if: matrix.scheme == 'LinkTV-iPhone'
+        run: |
+          app=$(find "$RUNNER_TEMP/linktv-build/Build/Products" -type d -name 'LinkTV-iPhone.app' -print -quit)
+          test -n "$app" && test -d "$app/PlugIns/LinkTVBroadcast.appex"
